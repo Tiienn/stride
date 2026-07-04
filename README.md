@@ -84,10 +84,18 @@ image ──► /api/analyze (Claude vision, forced tool-call JSON)
               │  walls, doors, windows, rooms, dimensions, scale,
               │  plan type (floor / office / site), site boundary
               ▼
+        /api/analyze phase=refine (verification pass)
+              │  Claude re-checks its extraction against the image:
+              │  missed/false walls, sealed rooms, missed doors, scale
+              ▼
       src/lib/planProcess.js
               │  px→meters, wall snapping/merging/axis alignment,
+              │  double-trace merging, T-junction gap closing,
+              │  scale cross-check against door widths,
               │  scale fallbacks (labels → door width → estimate),
-              │  10 cm grid flood-fill → real room footprints
+              │  10 cm grid flood-fill → real room footprints,
+              │  passable door widths, doorways punched into any
+              │  room the connectivity graph says you couldn't enter
               ▼
           ScenePlan  ◄─── also produced directly by bundled samples
               │
