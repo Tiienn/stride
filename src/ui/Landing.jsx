@@ -162,7 +162,7 @@ export default function Landing() {
         <div className="samples" ref={samplesRef}>
           <div className="samples-head">
             <span>Or step into a sample</span>
-            <span className="fine">runs locally · no API key needed</span>
+            <span className="fine">loads instantly</span>
           </div>
           <div className="sample-row">
             {SAMPLES.map((s) => (
@@ -177,8 +177,7 @@ export default function Landing() {
       </main>
 
       <footer className="landing-foot">
-        Uploads are analyzed with the Claude API via your own server key ·{' '}
-        <code>.env → ANTHROPIC_API_KEY</code>
+        Your plan is only used to build your 3D walkthrough.
       </footer>
     </div>
   )
