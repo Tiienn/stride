@@ -1,0 +1,529 @@
+#!/usr/bin/env node
+// Synthetic floor-plan generator for training a specialized plan-recognition
+// model. Produces, per sample:
+//   img_NNNNN.png  — a stylized architectural drawing (randomized style)
+//   msk_NNNNN.png  — pixel-perfect class mask (bg/wall/door/window)
+//   gt_NNNNN.json  — ground truth in the same schema Stride's Claude analyzer
+//                    emits, so model output can flow into planProcess.js
+//
+// Usage: node ml/generate.mjs --count 1000 --out ml/data/train --seed 1
+//
+// The layout is generated in METERS (BSP splits of a rectangular footprint,
+// doors placed on a spanning tree of the room-adjacency graph so every plan
+// is fully walkable), then rendered to pixels at a random scale. Style — wall
+// fills, door arcs, fonts, dimension lines, furniture distractors, paper
+// grids — is randomized per sample so the model learns geometry, not style.
+
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { Resvg } from '@resvg/resvg-js'
+
+// ---------------------------------------------------------------------------
+// CLI + RNG
+// ---------------------------------------------------------------------------
+
+const args = Object.fromEntries(
+  process.argv.slice(2).join(' ').split('--').filter(Boolean)
+    .map((s) => { const [k, ...v] = s.trim().split(/\s+/); return [k, v.join(' ') || true] })
+)
+const COUNT = parseInt(args.count || '20', 10)
+const OUT = args.out || 'ml/data/train'
+const SEED = parseInt(args.seed || '1', 10)
+
+function mulberry32(seed) {
+  let a = seed >>> 0
+  return () => {
+    a |= 0; a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+let rng = mulberry32(SEED)
+const rand = (a, b) => a + rng() * (b - a)
+const randi = (a, b) => Math.floor(rand(a, b + 1))
+const pick = (arr) => arr[Math.floor(rng() * arr.length)]
+const chance = (p) => rng() < p
+
+// ---------------------------------------------------------------------------
+// Layout generation (meters)
+// ---------------------------------------------------------------------------
+
+const MIN_ROOM = 2.0 // no BSP split may produce a room narrower than this
+
+function generateLayout() {
+  const W = rand(8, 18)
+  const H = rand(6, 14)
+  const targetRooms = randi(3, 9)
+
+  // BSP: repeatedly split the largest splittable leaf
+  let leaves = [{ x: 0, y: 0, w: W, h: H }]
+  const partitions = [] // interior walls: {axis:'v'|'h', c, a0, a1}
+  while (leaves.length < targetRooms) {
+    leaves.sort((p, q) => q.w * q.h - p.w * p.h)
+    const r = leaves.find((l) => Math.max(l.w, l.h) > MIN_ROOM * 2.2)
+    if (!r) break
+    leaves = leaves.filter((l) => l !== r)
+    const vertical = r.w === Math.max(r.w, r.h) ? !chance(0.15) : chance(0.15)
+    if (vertical) {
+      const c = r.x + r.w * rand(0.35, 0.65)
+      partitions.push({ axis: 'v', c, a0: r.y, a1: r.y + r.h })
+      leaves.push({ x: r.x, y: r.y, w: c - r.x, h: r.h })
+      leaves.push({ x: c, y: r.y, w: r.x + r.w - c, h: r.h })
+    } else {
+      const c = r.y + r.h * rand(0.35, 0.65)
+      partitions.push({ axis: 'h', c, a0: r.x, a1: r.x + r.w })
+      leaves.push({ x: r.x, y: r.y, w: r.w, h: c - r.y })
+      leaves.push({ x: r.x, y: c, w: r.w, h: r.y + r.h - c })
+    }
+  }
+
+  // Room adjacency via shared boundaries (for door placement)
+  const EPS = 1e-6
+  const adjacency = [] // {a, b, axis, c, lo, hi}
+  for (let i = 0; i < leaves.length; i++) {
+    for (let j = i + 1; j < leaves.length; j++) {
+      const A = leaves[i], B = leaves[j]
+      if (Math.abs(A.x + A.w - B.x) < EPS || Math.abs(B.x + B.w - A.x) < EPS) {
+        const c = Math.abs(A.x + A.w - B.x) < EPS ? A.x + A.w : B.x + B.w
+        const lo = Math.max(A.y, B.y), hi = Math.min(A.y + A.h, B.y + B.h)
+        if (hi - lo > 1.4) adjacency.push({ a: i, b: j, axis: 'v', c, lo, hi })
+      }
+      if (Math.abs(A.y + A.h - B.y) < EPS || Math.abs(B.y + B.h - A.y) < EPS) {
+        const c = Math.abs(A.y + A.h - B.y) < EPS ? A.y + A.h : B.y + B.h
+        const lo = Math.max(A.x, B.x), hi = Math.min(A.x + A.w, B.x + B.w)
+        if (hi - lo > 1.4) adjacency.push({ a: i, b: j, axis: 'h', c, lo, hi })
+      }
+    }
+  }
+
+  // Doors on a spanning tree => every room reachable; extras add circulation
+  const doors = [] // {axis, c, pos, width, kind}
+  const connected = new Set([0])
+  const edges = [...adjacency]
+  while (connected.size < leaves.length && edges.length) {
+    const idx = edges.findIndex((e) => connected.has(e.a) !== connected.has(e.b))
+    if (idx === -1) break
+    const [e] = edges.splice(idx, 1)
+    connected.add(e.a); connected.add(e.b)
+    doors.push(makeDoor(e, false))
+  }
+  for (const e of edges) if (chance(0.15)) doors.push(makeDoor(e, false))
+
+  function makeDoor(e, entrance) {
+    const width = entrance ? rand(0.9, 1.1) : rand(0.75, 1.0)
+    const pos = rand(e.lo + 0.35 + width / 2, e.hi - 0.35 - width / 2)
+    return { axis: e.axis, c: e.c, pos, width, kind: entrance ? 'entrance' : chance(0.12) ? 'doorway' : 'hinged' }
+  }
+
+  // Entrance on an exterior edge of some room
+  const extRooms = leaves.map((r, i) => ({ r, i })).filter(({ r }) =>
+    r.x < EPS || r.y < EPS || Math.abs(r.x + r.w - W) < EPS || Math.abs(r.y + r.h - H) < EPS)
+  const ent = pick(extRooms).r
+  const sides = []
+  if (ent.x < EPS) sides.push({ axis: 'v', c: 0, lo: ent.y, hi: ent.y + ent.h })
+  if (Math.abs(ent.x + ent.w - W) < EPS) sides.push({ axis: 'v', c: W, lo: ent.y, hi: ent.y + ent.h })
+  if (ent.y < EPS) sides.push({ axis: 'h', c: 0, lo: ent.x, hi: ent.x + ent.w })
+  if (Math.abs(ent.y + ent.h - H) < EPS) sides.push({ axis: 'h', c: H, lo: ent.x, hi: ent.x + ent.w })
+  const entSide = pick(sides)
+  const entranceDoor = makeDoor(entSide, true)
+  doors.push(entranceDoor)
+
+  // Windows on exterior edges, clear of the entrance
+  const windows = [] // {axis, c, pos, width}
+  for (const { r } of extRooms) {
+    const spans = []
+    if (r.x < EPS) spans.push({ axis: 'v', c: 0, lo: r.y, hi: r.y + r.h })
+    if (Math.abs(r.x + r.w - W) < EPS) spans.push({ axis: 'v', c: W, lo: r.y, hi: r.y + r.h })
+    if (r.y < EPS) spans.push({ axis: 'h', c: 0, lo: r.x, hi: r.x + r.w })
+    if (Math.abs(r.y + r.h - H) < EPS) spans.push({ axis: 'h', c: H, lo: r.x, hi: r.x + r.w })
+    for (const s of spans) {
+      const n = Math.max(0, Math.floor((s.hi - s.lo) / rand(2.6, 4.5)))
+      for (let k = 0; k < n; k++) {
+        if (!chance(0.85)) continue
+        const width = rand(0.6, Math.min(2.0, (s.hi - s.lo) * 0.4))
+        const pos = s.lo + ((k + 0.5) / n) * (s.hi - s.lo) + rand(-0.3, 0.3)
+        if (pos - width / 2 < s.lo + 0.3 || pos + width / 2 > s.hi - 0.3) continue
+        if (s.axis === entranceDoor.axis && Math.abs(s.c - entranceDoor.c) < EPS &&
+            Math.abs(pos - entranceDoor.pos) < (width + entranceDoor.width) / 2 + 0.4) continue
+        windows.push({ axis: s.axis, c: s.c, pos, width })
+      }
+    }
+  }
+
+  // Room typing by size + adjacency heuristics, mirroring real apartments
+  const order = leaves.map((r, i) => ({ r, i, area: r.w * r.h })).sort((p, q) => q.area - p.area)
+  const types = new Array(leaves.length).fill('bedroom')
+  types[order[0].i] = 'living'
+  if (order.length > 2) types[order[order.length - 1].i] = 'bathroom'
+  if (order.length > 3) {
+    const kitchen = order.find(({ i }) => i !== order[0].i && types[i] === 'bedroom' &&
+      adjacency.some((e) => (e.a === i && e.b === order[0].i) || (e.b === i && e.a === order[0].i)))
+    if (kitchen) types[kitchen.i] = 'kitchen'
+  }
+  leaves.forEach((r, i) => {
+    const aspect = Math.max(r.w / r.h, r.h / r.w)
+    if (types[i] === 'bedroom' && aspect > 2.6) types[i] = 'hall'
+    if (types[i] === 'bedroom' && r.w * r.h < 4.5) types[i] = 'storage'
+  })
+  let bedN = 0
+  const NAMES = { living: 'Living Room', kitchen: 'Kitchen', bathroom: 'Bathroom', hall: 'Hallway', storage: 'Storage' }
+  const rooms = leaves.map((r, i) => ({
+    ...r,
+    type: types[i],
+    name: types[i] === 'bedroom' ? `Bedroom ${++bedN}` : NAMES[types[i]],
+    area: r.w * r.h,
+  }))
+  if (bedN === 1) rooms.find((r) => r.name === 'Bedroom 1').name = 'Bedroom'
+
+  return {
+    W, H, rooms, doors, windows,
+    extThick: rand(0.24, 0.4),
+    intThick: rand(0.09, 0.16),
+    partitions,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wall segments (meters) from the layout — this is also the ground truth
+// ---------------------------------------------------------------------------
+
+function wallSegments(L) {
+  const walls = []
+  walls.push({ x1: 0, y1: 0, x2: L.W, y2: 0, t: L.extThick, ext: true })
+  walls.push({ x1: L.W, y1: 0, x2: L.W, y2: L.H, t: L.extThick, ext: true })
+  walls.push({ x1: L.W, y1: L.H, x2: 0, y2: L.H, t: L.extThick, ext: true })
+  walls.push({ x1: 0, y1: L.H, x2: 0, y2: 0, t: L.extThick, ext: true })
+  for (const p of L.partitions) {
+    if (p.axis === 'v') walls.push({ x1: p.c, y1: p.a0, x2: p.c, y2: p.a1, t: L.intThick, ext: false })
+    else walls.push({ x1: p.a0, y1: p.c, x2: p.a1, y2: p.c, t: L.intThick, ext: false })
+  }
+  return walls
+}
+
+// ---------------------------------------------------------------------------
+// Style sampling
+// ---------------------------------------------------------------------------
+
+const FONTS = ['DejaVu Sans', 'FreeSans', 'DejaVu Serif', 'Bitstream Charter', 'DejaVu Sans Mono']
+
+function sampleStyle() {
+  return {
+    ppm: rand(28, 60),
+    wallStyle: pick(['solid', 'solid', 'solid', 'double', 'gray', 'hatch']),
+    ink: pick(['#000000', '#000000', '#1a1a1a', '#22262e', '#26303b']),
+    background: pick(['#ffffff', '#ffffff', '#fdfcf8', 'grid', 'dots']),
+    font: pick(FONTS),
+    fontSize: rand(10, 15),
+    labelArea: chance(0.75),
+    dims: chance(0.7),
+    dimUnit: pick(['m', 'm', 'mm']),
+    roomDims: chance(0.3),
+    furniture: chance(0.75),
+    doorArcs: chance(0.9),
+    windowLines: randi(2, 3),
+    northArrow: chance(0.4),
+    titleBlock: chance(0.4),
+    tintRooms: chance(0.2),
+    thinStroke: rand(0.8, 1.6),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SVG rendering
+// ---------------------------------------------------------------------------
+
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+const f1 = (v) => (Math.round(v * 10) / 10).toString()
+
+function renderSample(L, S) {
+  const margin = S.dims ? rand(55, 95) : rand(20, 45)
+  const px = (m) => margin + m * S.ppm
+  const IW = Math.round(L.W * S.ppm + margin * 2)
+  const IH = Math.round(L.H * S.ppm + margin * 2 + (S.titleBlock ? 34 : 0))
+  const walls = wallSegments(L)
+
+  const img = []
+  const msk = []
+
+  // --- backgrounds -----------------------------------------------------
+  img.push(`<rect width="${IW}" height="${IH}" fill="${S.background.startsWith('#') ? S.background : '#ffffff'}"/>`)
+  if (S.background === 'grid') {
+    const g = rand(8, 15)
+    img.push(`<path d="${gridPath(IW, IH, g)}" stroke="${pick(['#dce8f2', '#e3e6ea', '#dfe9df'])}" stroke-width="0.7" fill="none"/>`)
+  } else if (S.background === 'dots') {
+    const g = rand(10, 16)
+    let d = ''
+    for (let y = g; y < IH; y += g) for (let x = g; x < IW; x += g) d += `M${f1(x)} ${f1(y)}h0.01`
+    img.push(`<path d="${d}" stroke="#c9d2da" stroke-width="1.4" stroke-linecap="round" fill="none"/>`)
+  }
+  msk.push(`<rect width="${IW}" height="${IH}" fill="#000000"/>`)
+
+  // room tints + furniture live under the walls
+  if (S.tintRooms) {
+    for (const r of L.rooms) {
+      img.push(`<rect x="${f1(px(r.x))}" y="${f1(px(r.y))}" width="${f1(r.w * S.ppm)}" height="${f1(r.h * S.ppm)}" fill="${pick(['#f7f4ee', '#f2f5f7', '#f6f2f2', '#f0f4ef'])}"/>`)
+    }
+  }
+  if (S.furniture) for (const r of L.rooms) img.push(furnitureSVG(r, px, S))
+
+  // --- walls -------------------------------------------------------------
+  if (S.wallStyle === 'hatch') {
+    img.push(`<defs><pattern id="hatch" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><line x1="0" y1="0" x2="0" y2="6" stroke="${S.ink}" stroke-width="1.4"/></pattern></defs>`)
+  }
+  for (const w of walls) {
+    const r = wallRect(w, px, S.ppm)
+    const rect = `x="${f1(r.x)}" y="${f1(r.y)}" width="${f1(r.w)}" height="${f1(r.h)}"`
+    if (S.wallStyle === 'solid') img.push(`<rect ${rect} fill="${S.ink}"/>`)
+    else if (S.wallStyle === 'gray') img.push(`<rect ${rect} fill="#8b8f94" stroke="${S.ink}" stroke-width="1"/>`)
+    else if (S.wallStyle === 'hatch') img.push(`<rect ${rect} fill="url(#hatch)" stroke="${S.ink}" stroke-width="1.2"/>`)
+    else img.push(`<rect ${rect} fill="#ffffff" stroke="${S.ink}" stroke-width="${f1(S.thinStroke * 1.2)}"/>`)
+    msk.push(`<rect ${rect} fill="#ff0000"/>`)
+  }
+
+  // --- openings ------------------------------------------------------------
+  for (const d of L.doors) {
+    const t = d.c === 0 || Math.abs(d.c - L.W) < 1e-6 || Math.abs(d.c - L.H) < 1e-6 ? L.extThick : L.intThick
+    const g = gapRect(d, t, px, S.ppm)
+    img.push(`<rect x="${f1(g.x)}" y="${f1(g.y)}" width="${f1(g.w)}" height="${f1(g.h)}" fill="${S.background.startsWith('#') ? S.background : '#ffffff'}"/>`)
+    msk.push(`<rect x="${f1(g.x)}" y="${f1(g.y)}" width="${f1(g.w)}" height="${f1(g.h)}" fill="#00ff00"/>`)
+    if (d.kind !== 'doorway' && S.doorArcs) img.push(doorArcSVG(d, px, S.ppm))
+  }
+  for (const w of L.windows) {
+    const g = gapRect(w, L.extThick, px, S.ppm)
+    img.push(`<rect x="${f1(g.x)}" y="${f1(g.y)}" width="${f1(g.w)}" height="${f1(g.h)}" fill="#ffffff" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>`)
+    // parallel glazing lines along the wall direction
+    for (let i = 1; i < S.windowLines; i++) {
+      const f = i / S.windowLines
+      if (w.axis === 'v') {
+        const x = g.x + g.w * f
+        img.push(`<line x1="${f1(x)}" y1="${f1(g.y)}" x2="${f1(x)}" y2="${f1(g.y + g.h)}" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>`)
+      } else {
+        const y = g.y + g.h * f
+        img.push(`<line x1="${f1(g.x)}" y1="${f1(y)}" x2="${f1(g.x + g.w)}" y2="${f1(y)}" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>`)
+      }
+    }
+    msk.push(`<rect x="${f1(g.x)}" y="${f1(g.y)}" width="${f1(g.w)}" height="${f1(g.h)}" fill="#0000ff"/>`)
+  }
+
+  // --- labels ----------------------------------------------------------
+  for (const r of L.rooms) {
+    const cx = px(r.x + r.w / 2)
+    const cy = px(r.y + r.h / 2)
+    const fs = Math.min(S.fontSize, (r.w * S.ppm) / (r.name.length * 0.62))
+    if (fs < 6.5) continue
+    const label = chance(0.15) ? r.name.toUpperCase() : r.name
+    img.push(`<text x="${f1(cx)}" y="${f1(cy)}" font-family="${S.font}" font-size="${f1(fs)}" fill="${S.ink}" text-anchor="middle">${esc(label)}</text>`)
+    if (S.labelArea && fs > 7.5) {
+      img.push(`<text x="${f1(cx)}" y="${f1(cy + fs * 1.25)}" font-family="${S.font}" font-size="${f1(fs * 0.82)}" fill="${S.ink}" text-anchor="middle">${r.area.toFixed(1)} m²</text>`)
+    }
+    if (S.roomDims && fs > 7.5) {
+      img.push(`<text x="${f1(cx)}" y="${f1(cy + fs * 2.4)}" font-family="${S.font}" font-size="${f1(fs * 0.78)}" fill="${S.ink}" text-anchor="middle">${dimText(r.w, S)} x ${dimText(r.h, S)}</text>`)
+    }
+  }
+
+  // --- dimension lines ---------------------------------------------------
+  if (S.dims) {
+    img.push(dimLineSVG(px(0), px(0) - rand(24, 38), px(L.W), 'h', dimText(L.W, S), S))
+    img.push(dimLineSVG(px(0), px(0) - rand(24, 38), px(L.H), 'v', dimText(L.H, S), S))
+    if (chance(0.5)) {
+      // per-room chain along the top from the first horizontal partition set
+      const xs = [...new Set(L.partitions.filter((p) => p.axis === 'v').map((p) => p.c))].sort((a, b) => a - b)
+      let prev = 0
+      const y = px(0) - rand(10, 16)
+      for (const c of [...xs, L.W]) {
+        if (c - prev > 1.2) img.push(dimLineSVG(px(prev), y, px(c), 'h', dimText(c - prev, S), S, true))
+        prev = c
+      }
+    }
+  }
+
+  if (S.northArrow) {
+    const nx = IW - rand(28, 46), ny = rand(30, 52)
+    img.push(`<circle cx="${f1(nx)}" cy="${f1(ny)}" r="13" fill="none" stroke="${S.ink}" stroke-width="1.2"/>` +
+      `<path d="M${f1(nx)} ${f1(ny - 10)} L${f1(nx - 4.5)} ${f1(ny + 7)} L${f1(nx)} ${f1(ny + 3)} L${f1(nx + 4.5)} ${f1(ny + 7)} Z" fill="${S.ink}"/>` +
+      `<text x="${f1(nx)}" y="${f1(ny - 16)}" font-family="${S.font}" font-size="10" fill="${S.ink}" text-anchor="middle">N</text>`)
+  }
+  if (S.titleBlock) {
+    img.push(`<text x="${f1(IW - 12)}" y="${f1(IH - 12)}" font-family="${S.font}" font-size="11" fill="${S.ink}" text-anchor="end">${pick(['FLOOR PLAN', 'GROUND FLOOR', 'FIRST FLOOR PLAN', 'PLAN VIEW'])}  ·  SCALE 1:${pick([50, 100, 100, 200])}</text>`)
+  }
+
+  // --- ground truth (pixels, Stride analyzer schema) ---------------------
+  const gt = {
+    planType: 'floor_residential',
+    planName: 'Synthetic plan',
+    confidence: 1,
+    imageSize: { width: IW, height: IH },
+    scale: { pixelsPerMeter: S.ppm, confidence: 1, source: 'dimension_label' },
+    walls: walls.map((w) => ({
+      start: { x: px(w.x1), y: px(w.y1) },
+      end: { x: px(w.x2), y: px(w.y2) },
+      thickness: w.t * S.ppm,
+      isExterior: w.ext,
+    })),
+    doors: L.doors.map((d) => ({
+      center: d.axis === 'v' ? { x: px(d.c), y: px(d.pos) } : { x: px(d.pos), y: px(d.c) },
+      width: d.width * S.ppm,
+      kind: d.kind,
+    })),
+    windows: L.windows.map((w) => ({
+      center: w.axis === 'v' ? { x: px(w.c), y: px(w.pos) } : { x: px(w.pos), y: px(w.c) },
+      width: w.width * S.ppm,
+    })),
+    rooms: L.rooms.map((r) => ({
+      name: r.name,
+      type: r.type,
+      center: { x: px(r.x + r.w / 2), y: px(r.y + r.h / 2) },
+      labeledArea: Math.round(r.area * 10) / 10,
+    })),
+  }
+
+  const svgOpen = `<svg xmlns="http://www.w3.org/2000/svg" width="${IW}" height="${IH}">`
+  return {
+    imageSvg: `${svgOpen}${img.join('')}</svg>`,
+    maskSvg: `${svgOpen}<g shape-rendering="crispEdges">${msk.join('')}</g></svg>`,
+    gt,
+  }
+}
+
+// wall segment (meters) -> pixel rect, extended by half thickness at both ends
+// so corners close
+function wallRect(w, px, ppm) {
+  const t = w.t * ppm
+  const x1 = px(Math.min(w.x1, w.x2)), x2 = px(Math.max(w.x1, w.x2))
+  const y1 = px(Math.min(w.y1, w.y2)), y2 = px(Math.max(w.y1, w.y2))
+  return x1 === x2
+    ? { x: x1 - t / 2, y: y1 - t / 2, w: t, h: y2 - y1 + t }
+    : { x: x1 - t / 2, y: y1 - t / 2, w: x2 - x1 + t, h: t }
+}
+
+// opening (door/window) -> pixel rect covering the wall breadth
+function gapRect(o, t, px, ppm) {
+  const half = (o.width / 2) * ppm
+  const tp = t * ppm
+  return o.axis === 'v'
+    ? { x: px(o.c) - tp / 2, y: px(o.pos) - half, w: tp, h: half * 2 }
+    : { x: px(o.pos) - half, y: px(o.c) - tp / 2, w: half * 2, h: tp }
+}
+
+function doorArcSVG(d, px, ppm) {
+  const w = d.width * ppm
+  const flip = chance(0.5) ? 1 : -1
+  const swing = chance(0.5) ? 1 : -1
+  let hx, hy, lx, ly // hinge and open-leaf tip (perpendicular to the wall)
+  if (d.axis === 'v') {
+    hx = px(d.c); hy = px(d.pos) - (w / 2) * flip
+    lx = hx + w * swing; ly = hy
+  } else {
+    hx = px(d.pos) - (w / 2) * flip; hy = px(d.c)
+    lx = hx; ly = hy + w * swing
+  }
+  // arc sweeps from the open leaf tip back to the far side of the gap
+  const arcEnd = d.axis === 'v' ? { x: hx, y: hy + w * flip } : { x: hx + w * flip, y: hy }
+  const sweep = (flip * swing) > 0 ? 1 : 0
+  return `<line x1="${f1(hx)}" y1="${f1(hy)}" x2="${f1(lx)}" y2="${f1(ly)}" stroke="#333" stroke-width="1.6"/>` +
+    `<path d="M${f1(lx)} ${f1(ly)} A${f1(w)} ${f1(w)} 0 0 ${sweep} ${f1(arcEnd.x)} ${f1(arcEnd.y)}" fill="none" stroke="#555" stroke-width="0.9"/>`
+}
+
+function dimText(meters, S) {
+  return S.dimUnit === 'mm' ? String(Math.round(meters * 1000)) : meters.toFixed(2)
+}
+
+// dimension line with end ticks + centered label; axis 'h' (along top) or 'v'
+// (down the left edge, rendered by swapping coordinates)
+function dimLineSVG(a, off, b, axis, label, S, minor = false) {
+  const fs = minor ? 8.5 : 10
+  const tick = 4
+  const mid = (a + b) / 2
+  if (axis === 'h') {
+    return `<line x1="${f1(a)}" y1="${f1(off)}" x2="${f1(b)}" y2="${f1(off)}" stroke="${S.ink}" stroke-width="0.9"/>` +
+      `<line x1="${f1(a)}" y1="${f1(off - tick)}" x2="${f1(a)}" y2="${f1(off + tick)}" stroke="${S.ink}" stroke-width="0.9"/>` +
+      `<line x1="${f1(b)}" y1="${f1(off - tick)}" x2="${f1(b)}" y2="${f1(off + tick)}" stroke="${S.ink}" stroke-width="0.9"/>` +
+      `<text x="${f1(mid)}" y="${f1(off - 4)}" font-family="${S.font}" font-size="${fs}" fill="${S.ink}" text-anchor="middle">${label}</text>`
+  }
+  // vertical: line runs down the left, at x=off; a/b are y pixel coords
+  return `<line x1="${f1(off)}" y1="${f1(a)}" x2="${f1(off)}" y2="${f1(b)}" stroke="${S.ink}" stroke-width="0.9"/>` +
+    `<line x1="${f1(off - tick)}" y1="${f1(a)}" x2="${f1(off + tick)}" y2="${f1(a)}" stroke="${S.ink}" stroke-width="0.9"/>` +
+    `<line x1="${f1(off - tick)}" y1="${f1(b)}" x2="${f1(off + tick)}" y2="${f1(b)}" stroke="${S.ink}" stroke-width="0.9"/>` +
+    `<text x="${f1(off - 4)}" y="${f1(mid)}" font-family="${S.font}" font-size="${fs}" fill="${S.ink}" text-anchor="middle" transform="rotate(-90 ${f1(off - 4)} ${f1(mid)})">${label}</text>`
+}
+
+function gridPath(w, h, g) {
+  let d = ''
+  for (let x = g; x < w; x += g) d += `M${f1(x)} 0V${h}`
+  for (let y = g; y < h; y += g) d += `M0 ${f1(y)}H${w}`
+  return d
+}
+
+// ---------------------------------------------------------------------------
+// Furniture distractors — thin-stroke symbols the model must learn to ignore
+// ---------------------------------------------------------------------------
+
+function furnitureSVG(room, px, S) {
+  const s = []
+  const stroke = `fill="none" stroke="${pick(['#444', '#555', S.ink])}" stroke-width="${f1(S.thinStroke)}"`
+  const rx = px(room.x), ry = px(room.y)
+  const rw = room.w * S.ppm, rh = room.h * S.ppm
+  const m = 0.35 * S.ppm // clearance from walls
+  const box = (x, y, w, h) => `<rect x="${f1(x)}" y="${f1(y)}" width="${f1(w)}" height="${f1(h)}" ${stroke}/>`
+
+  if (room.type === 'bedroom' && room.w > 2.8 && room.h > 2.8) {
+    const bw = 1.5 * S.ppm, bh = 2.0 * S.ppm
+    s.push(box(rx + m, ry + m, bw, bh))
+    s.push(box(rx + m + bw * 0.08, ry + m + 3, bw * 0.36, bh * 0.22))
+    s.push(box(rx + m + bw * 0.56, ry + m + 3, bw * 0.36, bh * 0.22))
+    if (room.w > 3.6) s.push(box(rx + rw - m - 0.6 * S.ppm, ry + m, 0.6 * S.ppm, Math.min(1.8, room.h - 1) * S.ppm))
+  } else if (room.type === 'living' && room.w > 3 && room.h > 3) {
+    const sw = Math.min(2.2, room.w - 1.4) * S.ppm
+    s.push(box(rx + m, ry + rh - m - 0.85 * S.ppm, sw, 0.85 * S.ppm))
+    s.push(box(rx + m + sw * 0.2, ry + rh - m - 2.0 * S.ppm, sw * 0.6, 0.6 * S.ppm))
+    if (chance(0.7)) s.push(box(rx + rw - m - 0.4 * S.ppm, ry + m, 0.4 * S.ppm, Math.min(1.6, room.h * 0.4) * S.ppm))
+  } else if (room.type === 'kitchen') {
+    const d = 0.6 * S.ppm
+    s.push(box(rx + m * 0.6, ry + m * 0.6, Math.min(rw - m * 1.2, rw * 0.9), d))
+    for (let i = 0; i < 4; i++) {
+      s.push(`<circle cx="${f1(rx + m + d * 0.6 + (i % 2) * d * 0.55)}" cy="${f1(ry + m * 0.6 + d * (0.3 + 0.45 * Math.floor(i / 2)))}" r="${f1(d * 0.16)}" ${stroke}/>`)
+    }
+  } else if (room.type === 'bathroom') {
+    const tw = 0.42 * S.ppm
+    s.push(`<ellipse cx="${f1(rx + m + tw / 2)}" cy="${f1(ry + m + tw * 0.8)}" rx="${f1(tw / 2)}" ry="${f1(tw * 0.65)}" ${stroke}/>`)
+    s.push(box(rx + m + tw * 0.1, ry + m - 2, tw * 0.8, tw * 0.4))
+    if (room.w > 1.9 && room.h > 1.9) {
+      const bw = Math.min(1.7, room.w - 1) * S.ppm
+      s.push(box(rx + rw - m - bw, ry + rh - m - 0.75 * S.ppm, bw, 0.75 * S.ppm))
+    }
+    s.push(`<circle cx="${f1(rx + rw - m - 0.3 * S.ppm)}" cy="${f1(ry + m + 0.25 * S.ppm)}" r="${f1(0.2 * S.ppm)}" ${stroke}/>`)
+  } else if ((room.type === 'living' || room.type === 'kitchen') || (room.type === 'bedroom' && chance(0.3))) {
+    // small table + chairs fallback
+  }
+  if ((room.type === 'living' || room.type === 'kitchen') && room.w > 2.6 && room.h > 2.6 && chance(0.6)) {
+    const cx = rx + rw / 2, cy = ry + rh / 2
+    const tw = 0.9 * S.ppm
+    s.push(box(cx - tw / 2, cy - tw / 2, tw, tw * 0.7))
+    s.push(box(cx - tw * 0.25, cy - tw / 2 - 0.35 * S.ppm, tw * 0.5, 0.3 * S.ppm))
+    s.push(box(cx - tw * 0.25, cy + tw * 0.2 + 0.05 * S.ppm, tw * 0.5, 0.3 * S.ppm))
+  }
+  return s.join('')
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+mkdirSync(OUT, { recursive: true })
+const t0 = Date.now()
+for (let i = 0; i < COUNT; i++) {
+  rng = mulberry32(SEED * 1_000_003 + i)
+  const layout = generateLayout()
+  const style = sampleStyle()
+  const { imageSvg, maskSvg, gt } = renderSample(layout, style)
+  const id = String(i).padStart(5, '0')
+  const opts = { font: { loadSystemFonts: true } }
+  writeFileSync(join(OUT, `img_${id}.png`), new Resvg(imageSvg, opts).render().asPng())
+  writeFileSync(join(OUT, `msk_${id}.png`), new Resvg(maskSvg, opts).render().asPng())
+  writeFileSync(join(OUT, `gt_${id}.json`), JSON.stringify(gt))
+  if ((i + 1) % 50 === 0 || i === COUNT - 1) {
+    console.log(`${i + 1}/${COUNT}  (${((Date.now() - t0) / (i + 1)).toFixed(0)} ms/sample)`)
+  }
+}
+console.log(`done → ${OUT}`)
