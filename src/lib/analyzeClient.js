@@ -1,6 +1,6 @@
 // Client side of the analysis pipeline: image prep → local neural net (walls/
 // doors/windows) + Claude (semantics, scale, plan type) → merge → ScenePlan.
-import { analysisToScenePlan } from './planProcess.js'
+import { analysisToScenePlan, geometryQuality } from './planProcess.js'
 import { segmentPlanImage, isUsableGeometry } from './planseg.js'
 
 const MAX_DIM = 1568 // Claude vision sweet spot — larger adds tokens, not accuracy
@@ -71,6 +71,30 @@ const ANALYSIS_STAGES = [
   'Almost there — packaging the geometry…',
 ]
 
+// Build both candidate worlds and score them: enclosure coverage minus
+// dangling-wall penalty (see geometryQuality). The model wins ties — its
+// coordinates are pixel-precise where Claude's drift — but a fragmented
+// extraction loses to a coherent Claude one instead of shipping stub walls.
+function geometryQualityOf(analysis) {
+  try {
+    return geometryQuality(analysisToScenePlan(analysis))
+  } catch {
+    return 0
+  }
+}
+
+function hybridBeatsClaude(local, claude) {
+  try {
+    const hybrid = { ...claude, walls: local.walls, doors: local.doors, windows: local.windows, imageSize: local.imageSize }
+    const qHybrid = geometryQuality(analysisToScenePlan(hybrid))
+    const qClaude = geometryQuality(analysisToScenePlan(claude))
+    if (import.meta.env.DEV) console.info(`[stride] geometry quality — neural net: ${qHybrid.toFixed(3)}, claude: ${qClaude.toFixed(3)}`)
+    return qHybrid >= qClaude
+  } catch {
+    return false
+  }
+}
+
 export async function analyzeUpload(file, onStatus, signal) {
   onStatus?.('Preparing image…')
   const prepped = await prepareImage(file)
@@ -114,9 +138,11 @@ export async function analyzeUpload(file, onStatus, signal) {
   if (claude && claude.planType === 'site') {
     // site plans have no walls to segment — Claude owns them end to end
     analysis = claude
-  } else if (claude && localUsable) {
+  } else if (claude && localUsable && hybridBeatsClaude(local, claude)) {
     // the hybrid: model geometry, Claude semantics. Claude's room centers are
-    // in the same pixel space (both saw the same prepared image).
+    // in the same pixel space (both saw the same prepared image). Gated: on
+    // plan styles the model wasn't trained on it fragments (furniture read
+    // as wall stubs), and then Claude's geometry is the better world.
     analysis = {
       ...claude,
       walls: local.walls,
@@ -147,10 +173,10 @@ export async function analyzeUpload(file, onStatus, signal) {
       if (err?.name === 'AbortError') throw err
       // keep the first-pass analysis
     }
-  } else if (localUsable) {
-    // no Claude (no API key, offline, quota) but the model read the plan:
-    // build anyway — rooms get synthesized from the geometry, scale from
-    // door widths. Uploads work with zero API cost.
+  } else if (localUsable && geometryQualityOf(local) > 0.3) {
+    // no Claude (no API key, offline, quota) but the model read the plan
+    // coherently: build anyway — rooms get synthesized from the geometry,
+    // scale from door widths. Uploads work with zero API cost.
     analysis = local
     onStatus?.('Building from the neural net’s reading (no API key needed)…')
   } else {

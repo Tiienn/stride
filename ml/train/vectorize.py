@@ -103,6 +103,21 @@ def mask_to_analysis(class_mask: np.ndarray) -> dict:
     min_len = max(12, int(min(h, w) * 0.03))
     walls = _wall_segments(solid, min_len)
 
+    # thickness filter: furniture/dimension lines misread as wall are a few
+    # px thick; real walls cluster near a dominant (length-weighted median)
+    # thickness — keep the two in sync with src/lib/maskVectorize.js
+    weighted = sorted(
+        ((wl["thickness"], ((wl["end"]["x"] - wl["start"]["x"]) ** 2 + (wl["end"]["y"] - wl["start"]["y"]) ** 2) ** 0.5)
+         for wl in walls), key=lambda e: e[0])
+    total = sum(l for _, l in weighted)
+    dom_thick, acc = 8.0, 0.0
+    for t, l in weighted:
+        acc += l
+        if acc >= total / 2:
+            dom_thick = t
+            break
+    walls = [wl for wl in walls if wl["thickness"] >= max(3.5, dom_thick * 0.45)]
+
     # exterior = touches the outer hull: walls whose center line is within 8%
     # of the wall-pixel bounding box border
     ys, xs = np.nonzero(solid)

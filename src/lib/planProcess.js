@@ -60,6 +60,7 @@ export function analysisToScenePlan(analysis) {
   walls = mergeDuplicateWalls(walls, 0.25)
   walls = mergeCollinearOverlaps(walls)
   walls = snapTJunctions(walls, 0.35)
+  walls = pruneOrphanWalls(walls)
 
   for (const d of analysis.doors || []) {
     if (!d?.center) continue
@@ -339,6 +340,56 @@ function snapTJunctions(walls, radius) {
     }
   }
   return walls
+}
+
+// Furniture outlines, dimension lines and railings misread as walls show up
+// as short segments floating in space. Real walls connect: prune segments
+// with free ends, iterating because removing one orphan can orphan another.
+// (A genuine partial wall — a kitchen peninsula, an entry stub — keeps one
+// end attached to the rest of the structure and survives.)
+function pruneOrphanWalls(walls) {
+  const touches = (p, list, self) =>
+    list.some((o) => o !== self && projectOnSegment(p, o.start, o.end).d < o.thickness / 2 + 0.22)
+  let changed = true
+  while (changed) {
+    changed = false
+    for (let i = walls.length - 1; i >= 0; i--) {
+      const w = walls[i]
+      const len = dist2d(w.start, w.end)
+      const freeEnds =
+        (touches(w.start, walls, w) ? 0 : 1) + (touches(w.end, walls, w) ? 0 : 1)
+      if ((freeEnds === 2 && len < 2.2) || (freeEnds >= 1 && len < 0.45)) {
+        walls.splice(i, 1)
+        changed = true
+      }
+    }
+  }
+  return walls
+}
+
+// How much does this plan's geometry look like a building? Used to arbitrate
+// between the neural net's extraction and Claude's when both are available.
+// Coverage: enclosed room area over the footprint bbox — fragmented or leaky
+// walls enclose little. Free ends: dangling wall endpoints are furniture/
+// noise misread as walls — penalize their share.
+export function geometryQuality(plan) {
+  if (!plan?.rooms?.length || !plan?.walls?.length) return 0
+  const bbox = (plan.bounds.maxX - plan.bounds.minX) * (plan.bounds.maxZ - plan.bounds.minZ)
+  if (!(bbox > 1)) return 0
+  const enclosed = plan.rooms.reduce((s, r) => s + (r.area || 0), 0)
+  let ends = 0
+  let freeEnds = 0
+  for (const w of plan.walls) {
+    for (const key of ['start', 'end']) {
+      ends++
+      const p = w[key]
+      const connected = plan.walls.some(
+        (o) => o !== w && projectOnSegment(p, o.start, o.end).d < o.thickness / 2 + 0.25
+      )
+      if (!connected) freeEnds++
+    }
+  }
+  return Math.min(1, enclosed / bbox) * (1 - 0.7 * (freeEnds / Math.max(1, ends)))
 }
 
 // Guarantee every non-window opening is physically walkable: the player

@@ -8,7 +8,25 @@ export function maskToAnalysis(classMask, w, h) {
   const solid = new Uint8Array(w * h)
   for (let i = 0; i < classMask.length; i++) solid[i] = classMask[i] > 0 ? 1 : 0
   const minLen = Math.max(12, Math.floor(Math.min(h, w) * 0.03))
-  const walls = wallSegments(solid, w, h, minLen)
+  let walls = wallSegments(solid, w, h, minLen)
+
+  // Thickness filter: furniture outlines and dimension lines misclassified
+  // as wall are a few px thick; real walls cluster near a dominant thickness.
+  // Length-weighted median gives that dominant value robustly.
+  const weighted = []
+  for (const wall of walls) {
+    const len = Math.hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y)
+    weighted.push({ t: wall.thickness, len })
+  }
+  weighted.sort((a, b) => a.t - b.t)
+  const totalLen = weighted.reduce((s, e) => s + e.len, 0)
+  let acc = 0
+  let domThick = 8
+  for (const e of weighted) {
+    acc += e.len
+    if (acc >= totalLen / 2) { domThick = e.t; break }
+  }
+  walls = walls.filter((wall) => wall.thickness >= Math.max(3.5, domThick * 0.45))
 
   // exterior = near the wall-pixel bounding box border
   let bx0 = w, bx1 = 0, by0 = h, by1 = 0, any = false

@@ -97,7 +97,23 @@ function generateLayout() {
     }
   }
 
-  // Doors on a spanning tree => every room reachable; extras add circulation
+  // Open-plan: erase the wall between some adjacent pairs — kitchen flowing
+  // into living with no partition, the single most common feature of real
+  // plans that fully-partitioned synthetics fail to teach.
+  const openGaps = [] // {axis, c, lo, hi} — subtracted from partitions
+  const openKeys = new Set()
+  if (adjacency.length && chance(0.55)) {
+    for (let k = 0; k < randi(1, Math.min(2, adjacency.length)); k++) {
+      const e = pick(adjacency)
+      const key = `${e.a}-${e.b}`
+      if (openKeys.has(key)) continue
+      openKeys.add(key)
+      openGaps.push({ axis: e.axis, c: e.c, lo: e.lo + rand(0.1, 0.5), hi: e.hi - rand(0.1, 0.5) })
+    }
+  }
+
+  // Doors on a spanning tree => every room reachable; extras add circulation.
+  // Open pairs connect without a door (the wall just isn't there).
   const doors = [] // {axis, c, pos, width, kind}
   const connected = new Set([0])
   const edges = [...adjacency]
@@ -106,9 +122,11 @@ function generateLayout() {
     if (idx === -1) break
     const [e] = edges.splice(idx, 1)
     connected.add(e.a); connected.add(e.b)
-    doors.push(makeDoor(e, false))
+    if (!openKeys.has(`${e.a}-${e.b}`)) doors.push(makeDoor(e, false))
   }
-  for (const e of edges) if (chance(0.15)) doors.push(makeDoor(e, false))
+  for (const e of edges) {
+    if (!openKeys.has(`${e.a}-${e.b}`) && chance(0.15)) doors.push(makeDoor(e, false))
+  }
 
   function makeDoor(e, entrance) {
     const width = entrance ? rand(0.9, 1.1) : rand(0.75, 1.0)
@@ -176,8 +194,35 @@ function generateLayout() {
   }))
   if (bedN === 1) rooms.find((r) => r.name === 'Bedroom 1').name = 'Bedroom'
 
+  // Balcony: a thin-outlined box attached OUTSIDE an exterior wall, reached
+  // through a sliding door. Its railing is deliberately NOT a wall in the
+  // mask — the model must learn that thin outline boxes aren't structure.
+  let balcony = null
+  if (chance(0.35)) {
+    const br = pick(extRooms).r
+    const bsides = []
+    if (br.x < EPS) bsides.push({ axis: 'v', c: 0, lo: br.y, hi: br.y + br.h, out: -1 })
+    if (Math.abs(br.x + br.w - W) < EPS) bsides.push({ axis: 'v', c: W, lo: br.y, hi: br.y + br.h, out: 1 })
+    if (br.y < EPS) bsides.push({ axis: 'h', c: 0, lo: br.x, hi: br.x + br.w, out: -1 })
+    if (Math.abs(br.y + br.h - H) < EPS) bsides.push({ axis: 'h', c: H, lo: br.x, hi: br.x + br.w, out: 1 })
+    const s = bsides.length ? pick(bsides) : null
+    if (s && s.hi - s.lo > 2.6) {
+      const bw = Math.min(rand(2.2, 4.2), s.hi - s.lo - 0.6)
+      const lo = rand(s.lo + 0.3, s.hi - 0.3 - bw)
+      balcony = { axis: s.axis, c: s.c, lo, hi: lo + bw, depth: rand(1.2, 2.2), out: s.out }
+      const slider = { axis: s.axis, c: s.c, pos: lo + bw / 2, width: Math.min(rand(1.4, 2.2), bw - 0.5), kind: 'sliding' }
+      doors.push(slider)
+      // windows were placed before the balcony existed — clear the slider's span
+      for (let i = windows.length - 1; i >= 0; i--) {
+        const win = windows[i]
+        if (win.axis === slider.axis && Math.abs(win.c - slider.c) < EPS &&
+            Math.abs(win.pos - slider.pos) < (win.width + slider.width) / 2 + 0.4) windows.splice(i, 1)
+      }
+    }
+  }
+
   return {
-    W, H, rooms, doors, windows,
+    W, H, rooms, doors, windows, openGaps, balcony,
     extThick: rand(0.24, 0.4),
     intThick: rand(0.09, 0.16),
     partitions,
@@ -195,8 +240,23 @@ function wallSegments(L) {
   walls.push({ x1: L.W, y1: L.H, x2: 0, y2: L.H, t: L.extThick, ext: true })
   walls.push({ x1: 0, y1: L.H, x2: 0, y2: 0, t: L.extThick, ext: true })
   for (const p of L.partitions) {
-    if (p.axis === 'v') walls.push({ x1: p.c, y1: p.a0, x2: p.c, y2: p.a1, t: L.intThick, ext: false })
-    else walls.push({ x1: p.a0, y1: p.c, x2: p.a1, y2: p.c, t: L.intThick, ext: false })
+    // subtract open-plan gaps: the partition simply doesn't exist there
+    let spans = [{ lo: p.a0, hi: p.a1 }]
+    for (const g of L.openGaps || []) {
+      if (g.axis !== p.axis || Math.abs(g.c - p.c) > 1e-6) continue
+      const next = []
+      for (const s of spans) {
+        if (g.hi <= s.lo || g.lo >= s.hi) { next.push(s); continue }
+        if (g.lo > s.lo) next.push({ lo: s.lo, hi: g.lo })
+        if (g.hi < s.hi) next.push({ lo: g.hi, hi: s.hi })
+      }
+      spans = next
+    }
+    for (const s of spans) {
+      if (s.hi - s.lo < 0.15) continue
+      if (p.axis === 'v') walls.push({ x1: p.c, y1: s.lo, x2: p.c, y2: s.hi, t: L.intThick, ext: false })
+      else walls.push({ x1: s.lo, y1: p.c, x2: s.hi, y2: p.c, t: L.intThick, ext: false })
+    }
   }
   return walls
 }
@@ -225,7 +285,9 @@ function sampleStyle() {
     northArrow: chance(0.4),
     titleBlock: chance(0.4),
     tintRooms: chance(0.2),
-    thinStroke: rand(0.8, 1.6),
+    thinStroke: rand(0.8, 2.6), // real plan furniture is often drawn bold
+    furnFill: chance(0.35) ? pick(['#ececec', '#f1efe9', '#e9edf1']) : 'none',
+    caption: chance(0.4),
   }
 }
 
@@ -237,7 +299,9 @@ const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
 const f1 = (v) => (Math.round(v * 10) / 10).toString()
 
 function renderSample(L, S) {
-  const margin = S.dims ? rand(55, 95) : rand(20, 45)
+  let margin = S.dims ? rand(55, 95) : rand(20, 45)
+  // a balcony hangs outside the footprint — widen all margins to fit it
+  if (L.balcony) margin = Math.max(margin, L.balcony.depth * S.ppm + 18)
   const px = (m) => margin + m * S.ppm
   const IW = Math.round(L.W * S.ppm + margin * 2)
   const IH = Math.round(L.H * S.ppm + margin * 2 + (S.titleBlock ? 34 : 0))
@@ -287,7 +351,19 @@ function renderSample(L, S) {
     const g = gapRect(d, t, px, S.ppm)
     img.push(`<rect x="${f1(g.x)}" y="${f1(g.y)}" width="${f1(g.w)}" height="${f1(g.h)}" fill="${S.background.startsWith('#') ? S.background : '#ffffff'}"/>`)
     msk.push(`<rect x="${f1(g.x)}" y="${f1(g.y)}" width="${f1(g.w)}" height="${f1(g.h)}" fill="#00ff00"/>`)
-    if (d.kind !== 'doorway' && S.doorArcs) img.push(doorArcSVG(d, px, S.ppm))
+    if (d.kind === 'sliding') {
+      // slider symbol: two offset panels along the wall line
+      const wpx = d.width * S.ppm
+      if (d.axis === 'v') {
+        img.push(`<line x1="${f1(g.x + g.w * 0.3)}" y1="${f1(g.y)}" x2="${f1(g.x + g.w * 0.3)}" y2="${f1(g.y + wpx * 0.55)}" stroke="${S.ink}" stroke-width="2"/>` +
+          `<line x1="${f1(g.x + g.w * 0.7)}" y1="${f1(g.y + wpx * 0.45)}" x2="${f1(g.x + g.w * 0.7)}" y2="${f1(g.y + g.h)}" stroke="${S.ink}" stroke-width="2"/>`)
+      } else {
+        img.push(`<line x1="${f1(g.x)}" y1="${f1(g.y + g.h * 0.3)}" x2="${f1(g.x + wpx * 0.55)}" y2="${f1(g.y + g.h * 0.3)}" stroke="${S.ink}" stroke-width="2"/>` +
+          `<line x1="${f1(g.x + wpx * 0.45)}" y1="${f1(g.y + g.h * 0.7)}" x2="${f1(g.x + g.w)}" y2="${f1(g.y + g.h * 0.7)}" stroke="${S.ink}" stroke-width="2"/>`)
+      }
+    } else if (d.kind !== 'doorway' && S.doorArcs) {
+      img.push(doorArcSVG(d, px, S.ppm))
+    }
   }
   for (const w of L.windows) {
     const g = gapRect(w, L.extThick, px, S.ppm)
@@ -336,6 +412,37 @@ function renderSample(L, S) {
         prev = c
       }
     }
+  }
+
+  // --- balcony (image only — its railing is intentionally NOT in the mask) --
+  if (L.balcony) {
+    const b = L.balcony
+    let bx, by, bw, bh
+    if (b.axis === 'v') {
+      bx = b.out < 0 ? px(b.c - b.depth) : px(b.c)
+      by = px(b.lo); bw = b.depth * S.ppm; bh = (b.hi - b.lo) * S.ppm
+    } else {
+      bx = px(b.lo); by = b.out < 0 ? px(b.c - b.depth) : px(b.c)
+      bw = (b.hi - b.lo) * S.ppm; bh = b.depth * S.ppm
+    }
+    const rail = rand(1.2, 2.2)
+    img.push(`<rect x="${f1(bx)}" y="${f1(by)}" width="${f1(bw)}" height="${f1(bh)}" fill="none" stroke="${S.ink}" stroke-width="${f1(rail)}"/>`)
+    // outdoor set: round table + two chairs
+    const cx = bx + bw / 2, cy = by + bh / 2
+    const tr = Math.min(bw, bh) * 0.16
+    img.push(`<circle cx="${f1(cx)}" cy="${f1(cy)}" r="${f1(tr)}" fill="${S.furnFill}" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>` +
+      `<rect x="${f1(cx - tr * 2)}" y="${f1(cy - tr * 0.6)}" width="${f1(tr * 0.9)}" height="${f1(tr * 1.2)}" fill="${S.furnFill}" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>` +
+      `<rect x="${f1(cx + tr * 1.1)}" y="${f1(cy - tr * 0.6)}" width="${f1(tr * 0.9)}" height="${f1(tr * 1.2)}" fill="${S.furnFill}" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>`)
+    const bfs = Math.min(S.fontSize, bw / 6)
+    if (bfs > 6.5) {
+      img.push(`<text x="${f1(cx)}" y="${f1(by + bh * 0.22)}" font-family="${S.font}" font-size="${f1(bfs)}" fill="${S.ink}" text-anchor="middle">Balcony</text>`)
+    }
+  }
+
+  // --- caption ("TOTAL AREA = 71 m²" style) ------------------------------
+  if (S.caption) {
+    const total = L.rooms.reduce((s, r) => s + r.area, 0)
+    img.push(`<text x="${f1(IW / 2)}" y="${f1(IH - 10)}" font-family="${S.font}" font-size="${f1(rand(11, 15))}" fill="${S.ink}" text-anchor="middle" font-weight="bold">TOTAL AREA = ${Math.round(total)} m²</text>`)
   }
 
   if (S.northArrow) {
@@ -461,7 +568,7 @@ function gridPath(w, h, g) {
 
 function furnitureSVG(room, px, S) {
   const s = []
-  const stroke = `fill="none" stroke="${pick(['#444', '#555', S.ink])}" stroke-width="${f1(S.thinStroke)}"`
+  const stroke = `fill="${S.furnFill}" stroke="${pick(['#444', '#555', S.ink])}" stroke-width="${f1(S.thinStroke)}"`
   const rx = px(room.x), ry = px(room.y)
   const rw = room.w * S.ppm, rh = room.h * S.ppm
   const m = 0.35 * S.ppm // clearance from walls
@@ -479,10 +586,23 @@ function furnitureSVG(room, px, S) {
     s.push(box(rx + m + sw * 0.2, ry + rh - m - 2.0 * S.ppm, sw * 0.6, 0.6 * S.ppm))
     if (chance(0.7)) s.push(box(rx + rw - m - 0.4 * S.ppm, ry + m, 0.4 * S.ppm, Math.min(1.6, room.h * 0.4) * S.ppm))
   } else if (room.type === 'kitchen') {
+    // counter run with hob burners, sink and a fridge — drawn boldly, the way
+    // RoomSketcher-style plans do, so the model learns counters aren't walls
     const d = 0.6 * S.ppm
-    s.push(box(rx + m * 0.6, ry + m * 0.6, Math.min(rw - m * 1.2, rw * 0.9), d))
+    const runW = Math.min(rw - m * 1.2, rw * 0.9)
+    s.push(box(rx + m * 0.6, ry + m * 0.6, runW, d))
+    const hobX = rx + m * 0.6 + runW * 0.32
+    s.push(box(hobX, ry + m * 0.6 + 1, d * 1.1, d - 2))
     for (let i = 0; i < 4; i++) {
-      s.push(`<circle cx="${f1(rx + m + d * 0.6 + (i % 2) * d * 0.55)}" cy="${f1(ry + m * 0.6 + d * (0.3 + 0.45 * Math.floor(i / 2)))}" r="${f1(d * 0.16)}" ${stroke}/>`)
+      s.push(`<circle cx="${f1(hobX + d * (0.3 + 0.55 * (i % 2)))}" cy="${f1(ry + m * 0.6 + d * (0.28 + 0.45 * Math.floor(i / 2)))}" r="${f1(d * 0.14)}" ${stroke}/>`)
+    }
+    const sinkX = rx + m * 0.6 + runW * 0.7
+    s.push(`<circle cx="${f1(sinkX)}" cy="${f1(ry + m * 0.6 + d * 0.5)}" r="${f1(d * 0.26)}" ${stroke}/>`)
+    if (runW > 3 * d) {
+      const frX = rx + m * 0.6 + runW - d * 1.05
+      s.push(box(frX, ry + m * 0.6 + 1, d, d - 2))
+      const ffs = d * 0.34
+      if (ffs > 6) s.push(`<text x="${f1(frX + d / 2)}" y="${f1(ry + m * 0.6 + d * 0.6)}" font-family="${S.font}" font-size="${f1(ffs)}" fill="${S.ink}" text-anchor="middle">R/F</text>`)
     }
   } else if (room.type === 'bathroom') {
     const tw = 0.42 * S.ppm

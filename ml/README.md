@@ -118,7 +118,18 @@ effort:
 - [x] ONNX export + browser inference in Stride (onnxruntime-web wasm,
       src/lib/planseg.js; ~20-25s single-threaded, runs in parallel with the
       Claude call so uploads pay no extra latency)
+- [x] Quality arbitration: build both candidate worlds (model geometry vs
+      Claude geometry), score enclosure coverage minus dangling-wall penalty,
+      ship the winner — a fragmented model read no longer beats Claude
+- [x] Generator v2: open-plan rooms (no wall between kitchen/living),
+      balconies with thin railings + sliding doors (railing ≠ wall in the
+      mask), bold/filled furniture, hob + sink + R/F fridge symbols,
+      TOTAL AREA captions — the RoomSketcher-style features that broke v1.
+      Measured v1 on v2-style plans: door IoU drops 0.925→0.716 → retrain:
+      re-run ml/colab_train.ipynb on this branch, upload best.pt +
+      stride-planseg.onnx as a `model-v2` release, update MODEL_URL in
+      scripts/fetch-model.mjs
+- [ ] Retrain on v2 data (Colab, same notebook) → model-v2 release
 - [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
-- [ ] Benchmark vs. Claude-only on real (non-synthetic) uploaded plans
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
       keystone warp) / real-data flywheel
