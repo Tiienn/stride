@@ -34,6 +34,12 @@ noise, contrast, grayscale) so it survives phone photos and old scans.
 
 ## Step 2 — Train
 
+### Easiest: one-click Colab (free GPU, no setup)
+
+Open **[`ml/colab_train.ipynb`](https://colab.research.google.com/github/tiienn/stride/blob/main-uiyymm/ml/colab_train.ipynb)** in Google Colab, set the runtime to a T4 GPU (Runtime → Change runtime type → T4 GPU), then **Runtime → Run all**. It clones the repo, generates the dataset, trains, previews a prediction, exports ONNX, and downloads `best.pt` + `stride-planseg.onnx`. Lower `SAMPLES`/`EPOCHS` in the config cell for a quick end-to-end test first.
+
+### Or locally / on your own GPU
+
 Needs a GPU for real runs (any consumer card works; Colab's free T4 is fine).
 
 ```bash
