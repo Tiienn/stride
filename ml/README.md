@@ -111,7 +111,14 @@ effort:
 - [x] Synthetic generator (image + mask + analyzer-schema ground truth)
 - [x] Training pipeline (U-Net, augmentations, IoU tracking)
 - [x] Inference + vectorization into Stride's pipeline
-- [ ] Real training run on GPU (10k samples, 30 epochs)
-- [ ] Benchmark vs. Claude-only on held-out plans (val set + real plans)
-- [ ] ONNX export + browser inference in Stride
-- [ ] Harder synthetics / real-data flywheel
+- [x] Real training run (Colab T4, 10k samples, 30 epochs):
+      val IoU wall 0.937 / door 0.845 / window 0.924;
+      held-out (fresh seed, full-res) wall 0.966 / door 0.925 / window 0.945
+- [x] Model published as the `model-v1` GitHub release
+- [x] ONNX export + browser inference in Stride (onnxruntime-web wasm,
+      src/lib/planseg.js; ~20-25s single-threaded, runs in parallel with the
+      Claude call so uploads pay no extra latency)
+- [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
+- [ ] Benchmark vs. Claude-only on real (non-synthetic) uploaded plans
+- [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
+      keystone warp) / real-data flywheel

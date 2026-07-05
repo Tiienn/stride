@@ -80,13 +80,18 @@ embedded browsers), Stride falls back to drag-to-look automatically.
 ## How it works
 
 ```
-image ──► /api/analyze (Claude vision, forced tool-call JSON)
-              │  walls, doors, windows, rooms, dimensions, scale,
-              │  plan type (floor / office / site), site boundary
-              ▼
-        /api/analyze phase=refine (verification pass)
-              │  Claude re-checks its extraction against the image:
-              │  missed/false walls, sealed rooms, missed doors, scale
+image ──┬─► in-browser neural net (ONNX U-Net, trained on synthetic plans)
+        │       walls, doors, windows — pixel-precise, free, offline
+        │       (src/lib/planseg.js + maskVectorize.js; model from the
+        │        model-v1 GitHub release via scripts/fetch-model.mjs)
+        │
+        └─► /api/analyze (Claude vision, forced tool-call JSON)
+                room names/types, plan type, scale from printed
+                dimensions, site boundaries
+              │
+              ▼  merge: model geometry + Claude semantics
+              │  (Claude-only + refine pass if the model is unsure;
+              │   model-only if there's no API key — uploads still work)
               ▼
       src/lib/planProcess.js
               │  px→meters, wall snapping/merging/axis alignment,

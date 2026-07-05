@@ -8,3 +8,5 @@ ml/data/
 ml/checkpoints/
 __pycache__/
 *.onnx
+public/models/
+public/ort/

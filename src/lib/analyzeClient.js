@@ -1,5 +1,7 @@
-// Client side of the analysis pipeline: image prep → /api/analyze → ScenePlan.
+// Client side of the analysis pipeline: image prep → local neural net (walls/
+// doors/windows) + Claude (semantics, scale, plan type) → merge → ScenePlan.
 import { analysisToScenePlan } from './planProcess.js'
+import { segmentPlanImage, isUsableGeometry } from './planseg.js'
 
 const MAX_DIM = 1568 // Claude vision sweet spot — larger adds tokens, not accuracy
 const MIN_DIM = 1100 // below this, upscale: more visual tokens = thin walls survive
@@ -73,6 +75,12 @@ export async function analyzeUpload(file, onStatus, signal) {
   onStatus?.('Preparing image…')
   const prepped = await prepareImage(file)
 
+  // Local neural net and Claude run in parallel. The model owns geometry
+  // (walls/doors/windows — pixel-precise, instant, free); Claude owns
+  // semantics (plan type, room names/types, scale from printed dimensions).
+  onStatus?.('Reading the plan with Stride’s neural net…')
+  const localPromise = segmentPlanImage(prepped.dataUrl, prepped.width, prepped.height)
+
   let stage = 0
   onStatus?.(ANALYSIS_STAGES[0])
   const rotate = setInterval(() => {
@@ -80,27 +88,46 @@ export async function analyzeUpload(file, onStatus, signal) {
     onStatus?.(ANALYSIS_STAGES[stage])
   }, 5000)
 
-  let res
+  let claude = null
+  let claudeError = null
   try {
-    res = await fetch('/api/analyze', {
+    const res = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image: prepped.base64, mediaType: prepped.mediaType }),
       signal,
     })
+    const payload = await res.json().catch(() => ({}))
+    if (res.ok && payload.analysis) claude = payload.analysis
+    else claudeError = new Error(payload.error || `Analysis failed (${res.status})`)
+  } catch (err) {
+    if (err?.name === 'AbortError') throw err
+    claudeError = err
   } finally {
     clearInterval(rotate)
   }
-  const payload = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(payload.error || `Analysis failed (${res.status})`)
-  if (!payload.analysis) throw new Error('The analyzer returned nothing usable.')
 
-  let analysis = payload.analysis
-  // Verification pass: Claude re-checks its own extraction against the image
-  // and returns corrections (missed walls/doors/rooms, false walls, scale).
-  // Interior plans only — that's where the wall/door errors live — and never
-  // fatal: on any failure we build from the first pass.
-  if (analysis.planType !== 'site') {
+  const local = await localPromise
+  const localUsable = isUsableGeometry(local)
+
+  let analysis
+  if (claude && claude.planType === 'site') {
+    // site plans have no walls to segment — Claude owns them end to end
+    analysis = claude
+  } else if (claude && localUsable) {
+    // the hybrid: model geometry, Claude semantics. Claude's room centers are
+    // in the same pixel space (both saw the same prepared image).
+    analysis = {
+      ...claude,
+      walls: local.walls,
+      doors: local.doors,
+      windows: local.windows,
+      imageSize: local.imageSize,
+    }
+    onStatus?.('Merging neural-net geometry with Claude’s reading…')
+  } else if (claude) {
+    // model unavailable/uncertain → Claude-only, with its verification pass
+    analysis = claude
     try {
       onStatus?.('Cross-checking every wall and door against the drawing…')
       const res2 = await fetch('/api/analyze', {
@@ -120,6 +147,14 @@ export async function analyzeUpload(file, onStatus, signal) {
       if (err?.name === 'AbortError') throw err
       // keep the first-pass analysis
     }
+  } else if (localUsable) {
+    // no Claude (no API key, offline, quota) but the model read the plan:
+    // build anyway — rooms get synthesized from the geometry, scale from
+    // door widths. Uploads work with zero API cost.
+    analysis = local
+    onStatus?.('Building from the neural net’s reading (no API key needed)…')
+  } else {
+    throw claudeError || new Error('The analyzer returned nothing usable.')
   }
 
   onStatus?.('Building the 3D world…')

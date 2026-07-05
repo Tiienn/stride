@@ -116,8 +116,13 @@ def mask_to_analysis(class_mask: np.ndarray) -> dict:
                or (abs(sx - bx0) < mx and abs(ex - bx0) < mx) or (abs(sx - bx1) < mx and abs(ex - bx1) < mx):
                 wall["isExterior"] = True
 
-    doors = [{**o, "kind": "hinged"} for o in _openings(class_mask, 2)]
-    windows = _openings(class_mask, 3)
+    # speck filter: real doors are wider than ~1.2 wall thicknesses
+    thicknesses = sorted(w["thickness"] for w in walls)
+    med_thick = thicknesses[len(thicknesses) // 2] if thicknesses else 8
+    min_open = max(16, med_thick * 1.2)
+
+    doors = [{**o, "kind": "hinged"} for o in _openings(class_mask, 2) if o["width"] >= min_open]
+    windows = [o for o in _openings(class_mask, 3) if o["width"] >= min_open * 0.6]
 
     return {
         "planType": "floor_residential",

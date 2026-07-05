@@ -111,9 +111,15 @@ function resolveScale(analysis) {
       if (px > 10 && meters > 0.5) return px / meters
     }
   }
-  // Fallback 2: standard door width
-  const door = (analysis.doors || []).find((d) => d?.width > 5)
-  if (door) return door.width / 0.9
+  // Fallback 2: standard door width. Detections include specks and partial
+  // gaps below the real door sizes, so keep the upper cluster (≥40% of the
+  // widest) and read high in it — real hinged doors dominate that range.
+  const widths = (analysis.doors || []).map((d) => d?.width).filter((w) => w > 5).sort((a, b) => a - b)
+  if (widths.length) {
+    const top = widths.filter((w) => w >= widths[widths.length - 1] * 0.4 && w >= 18)
+    const use = top.length ? top : widths
+    return use[Math.min(use.length - 1, Math.floor(use.length * 0.7))] / 0.9
+  }
   // Fallback 3: assume the drawing spans ~14 m
   const size = analysis.imageSize || guessImageSize(analysis)
   return Math.max(size.width, size.height) / 14
