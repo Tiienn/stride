@@ -75,6 +75,34 @@ const ANALYSIS_STAGES = [
 // dangling-wall penalty (see geometryQuality). The model wins ties — its
 // coordinates are pixel-precise where Claude's drift — but a fragmented
 // extraction loses to a coherent Claude one instead of shipping stub walls.
+// The model wins on precision but can miss whole walls on unfamiliar plan
+// styles; Claude sees those but drifts on coordinates. Union: keep every
+// model wall, and add Claude walls that have no model counterpart along
+// most of their length. Downstream cleanup (collinear merge, orphan prune)
+// and the quality gate keep the occasional Claude hallucination in check.
+function pointSegDist(p, a, b) {
+  const abx = b.x - a.x
+  const aby = b.y - a.y
+  const lenSq = abx * abx + aby * aby || 1e-9
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / lenSq))
+  return Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t))
+}
+
+export function unionWalls(modelWalls, claudeWalls) {
+  const out = [...modelWalls]
+  for (const cw of claudeWalls || []) {
+    if (!cw?.start || !cw?.end) continue
+    const tol = Math.max(14, (cw.thickness || 10) * 1.6)
+    let covered = 0
+    for (const t of [0.15, 0.5, 0.85]) {
+      const p = { x: cw.start.x + (cw.end.x - cw.start.x) * t, y: cw.start.y + (cw.end.y - cw.start.y) * t }
+      if (modelWalls.some((mw) => pointSegDist(p, mw.start, mw.end) < tol)) covered++
+    }
+    if (covered <= 1) out.push({ ...cw, fromClaude: true })
+  }
+  return out
+}
+
 function geometryQualityOf(analysis) {
   try {
     return geometryQuality(analysisToScenePlan(analysis))
@@ -83,10 +111,19 @@ function geometryQualityOf(analysis) {
   }
 }
 
+function buildHybrid(local, claude) {
+  return {
+    ...claude,
+    walls: unionWalls(local.walls, claude.walls),
+    doors: local.doors,
+    windows: local.windows,
+    imageSize: local.imageSize,
+  }
+}
+
 function hybridBeatsClaude(local, claude) {
   try {
-    const hybrid = { ...claude, walls: local.walls, doors: local.doors, windows: local.windows, imageSize: local.imageSize }
-    const qHybrid = geometryQuality(analysisToScenePlan(hybrid))
+    const qHybrid = geometryQuality(analysisToScenePlan(buildHybrid(local, claude)))
     const qClaude = geometryQuality(analysisToScenePlan(claude))
     if (import.meta.env.DEV) console.info(`[stride] geometry quality — neural net: ${qHybrid.toFixed(3)}, claude: ${qClaude.toFixed(3)}`)
     return qHybrid >= qClaude
@@ -139,17 +176,12 @@ export async function analyzeUpload(file, onStatus, signal) {
     // site plans have no walls to segment — Claude owns them end to end
     analysis = claude
   } else if (claude && localUsable && hybridBeatsClaude(local, claude)) {
-    // the hybrid: model geometry, Claude semantics. Claude's room centers are
-    // in the same pixel space (both saw the same prepared image). Gated: on
-    // plan styles the model wasn't trained on it fragments (furniture read
-    // as wall stubs), and then Claude's geometry is the better world.
-    analysis = {
-      ...claude,
-      walls: local.walls,
-      doors: local.doors,
-      windows: local.windows,
-      imageSize: local.imageSize,
-    }
+    // the hybrid: model geometry (plus Claude walls the model missed —
+    // unionWalls), Claude semantics. Claude's room centers are in the same
+    // pixel space (both saw the same prepared image). Gated: on plan styles
+    // the model wasn't trained on it fragments (furniture read as wall
+    // stubs), and then Claude's geometry is the better world.
+    analysis = buildHybrid(local, claude)
     onStatus?.('Merging neural-net geometry with Claude’s reading…')
   } else if (claude) {
     // model unavailable/uncertain → Claude-only, with its verification pass
