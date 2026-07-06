@@ -129,6 +129,21 @@ effort:
       re-run ml/colab_train.ipynb on this branch, upload best.pt +
       stride-planseg.onnx as a `model-v2` release, update MODEL_URL in
       scripts/fetch-model.mjs
+- [x] Fixed a native memory leak in the generator: `@resvg/resvg-js` leaks
+      ~2.7MB per `Resvg` instantiation, unbounded, regardless of font
+      options — confirmed by measurement (15GB+ RSS by sample 5500, this
+      sandbox's own OOM killer stopped it). This is exactly what silently
+      truncated a Colab run at sample 2697/10000: Colab's `!shell` cells
+      don't halt "Run all" on a non-zero exit, so training proceeded on an
+      incomplete dataset until it hit the hole. Fixed in generate.mjs: large
+      counts now run as a driver that restarts itself in a fresh subprocess
+      every 400 samples (`--chunk`, byte-identical output either way — see
+      the determinism check in git history) and verifies the exact file
+      count on exit, non-zero otherwise. The Colab notebook's generation
+      cell now uses `subprocess.run(check=True)` instead of raw `!` shell
+      magics so a failure actually stops the run, plus an explicit image-
+      count assert. Also dropped `Bitstream Charter` from the font list (no
+      TTF/OTF on this system, only legacy Type1 — resvg can't parse it).
 - [ ] Retrain on v2 data (Colab, same notebook) → model-v2 release
 - [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,

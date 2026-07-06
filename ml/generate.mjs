@@ -14,8 +14,10 @@
 // fills, door arcs, fonts, dimension lines, furniture distractors, paper
 // grids — is randomized per sample so the model learns geometry, not style.
 
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, globSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { Resvg } from '@resvg/resvg-js'
 
 // ---------------------------------------------------------------------------
@@ -29,6 +31,28 @@ const args = Object.fromEntries(
 const COUNT = parseInt(args.count || '20', 10)
 const OUT = args.out || 'ml/data/train'
 const SEED = parseInt(args.seed || '1', 10)
+const START = parseInt(args.start || '0', 10) // global sample index this process starts at
+// @resvg/resvg-js (2.6.2) leaks native memory on every Resvg instantiation —
+// confirmed ~2.7MB/call, unbounded, regardless of font-loading options. Left
+// unchecked, generating 10k samples in one process grows to >25GB RSS and
+// gets OOM-killed partway through (exactly what silently truncated a run on
+// Colab's free-tier VM). Below this chunk size, this process renders
+// in-process; above it, it becomes a driver that restarts itself in a fresh
+// subprocess every CHUNK samples so the OS reclaims the leak on each exit.
+const CHUNK = parseInt(args.chunk || '400', 10)
+
+// Cheap, explicit font files instead of loadSystemFonts: true — that option
+// rescans every font on the system on every single call, which is wasted
+// work at this scale even though it isn't the source of the leak above.
+const FONT_FILES = [
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+  '/usr/share/fonts/truetype/freefont/FreeSans.ttf',
+  '/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf',
+  '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
+].filter(existsSync)
+const RESVG_OPTS = FONT_FILES.length
+  ? { font: { loadSystemFonts: false, fontFiles: FONT_FILES, defaultFontFamily: 'DejaVu Sans' } }
+  : { font: { loadSystemFonts: true } } // fallback for systems without these exact paths
 
 function mulberry32(seed) {
   let a = seed >>> 0
@@ -265,7 +289,11 @@ function wallSegments(L) {
 // Style sampling
 // ---------------------------------------------------------------------------
 
-const FONTS = ['DejaVu Sans', 'FreeSans', 'DejaVu Serif', 'Bitstream Charter', 'DejaVu Sans Mono']
+// Charter is deliberately absent: this system only has it as legacy Type1
+// (.pfb), which resvg's font engine (TTF/OTF/TTC only) can't parse — with
+// loadSystemFonts:true it silently fell back to a default, wasting the
+// "diversity" slot; with explicit fontFiles it just wouldn't render.
+const FONTS = ['DejaVu Sans', 'FreeSans', 'DejaVu Serif', 'DejaVu Sans Mono']
 
 function sampleStyle() {
   return {
@@ -627,23 +655,71 @@ function furnitureSVG(room, px, S) {
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Worker: render `count` samples starting at global index START. Used
+// directly for small counts, or invoked as a subprocess per chunk otherwise.
 // ---------------------------------------------------------------------------
 
-mkdirSync(OUT, { recursive: true })
-const t0 = Date.now()
-for (let i = 0; i < COUNT; i++) {
-  rng = mulberry32(SEED * 1_000_003 + i)
-  const layout = generateLayout()
-  const style = sampleStyle()
-  const { imageSvg, maskSvg, gt } = renderSample(layout, style)
-  const id = String(i).padStart(5, '0')
-  const opts = { font: { loadSystemFonts: true } }
-  writeFileSync(join(OUT, `img_${id}.png`), new Resvg(imageSvg, opts).render().asPng())
-  writeFileSync(join(OUT, `msk_${id}.png`), new Resvg(maskSvg, opts).render().asPng())
-  writeFileSync(join(OUT, `gt_${id}.json`), JSON.stringify(gt))
-  if ((i + 1) % 50 === 0 || i === COUNT - 1) {
-    console.log(`${i + 1}/${COUNT}  (${((Date.now() - t0) / (i + 1)).toFixed(0)} ms/sample)`)
+function renderRange(start, count, out) {
+  mkdirSync(out, { recursive: true })
+  const t0 = Date.now()
+  for (let k = 0; k < count; k++) {
+    const i = start + k
+    rng = mulberry32(SEED * 1_000_003 + i)
+    const layout = generateLayout()
+    const style = sampleStyle()
+    const { imageSvg, maskSvg, gt } = renderSample(layout, style)
+    const id = String(i).padStart(5, '0')
+    writeFileSync(join(out, `img_${id}.png`), new Resvg(imageSvg, RESVG_OPTS).render().asPng())
+    writeFileSync(join(out, `msk_${id}.png`), new Resvg(maskSvg, RESVG_OPTS).render().asPng())
+    writeFileSync(join(out, `gt_${id}.json`), JSON.stringify(gt))
+    if ((k + 1) % 50 === 0 || k === count - 1) {
+      console.log(`${i + 1}/${START_TOTAL || count}  (${((Date.now() - t0) / (k + 1)).toFixed(0)} ms/sample, this process)`)
+    }
   }
 }
-console.log(`done → ${OUT}`)
+
+// ---------------------------------------------------------------------------
+// Driver: for large counts, restart in fresh subprocesses every CHUNK
+// samples so resvg's native leak (see CHUNK comment above) can't accumulate
+// past a bounded ceiling — instead of growing until the OS kills the process
+// partway through, silently truncating the dataset.
+// ---------------------------------------------------------------------------
+
+const START_TOTAL = args._worker ? parseInt(args.total || '0', 10) : 0
+
+if (args._worker || COUNT <= CHUNK) {
+  renderRange(START, COUNT, OUT)
+  if (!args._worker) verifyComplete(0, COUNT, OUT)
+} else {
+  const t0 = Date.now()
+  const self = fileURLToPath(import.meta.url)
+  for (let start = 0; start < COUNT; start += CHUNK) {
+    const n = Math.min(CHUNK, COUNT - start)
+    const res = spawnSync(process.execPath, [
+      self, '--count', String(n), '--out', OUT, '--seed', String(SEED),
+      '--start', String(start), '--total', String(COUNT), '--_worker',
+    ], { stdio: 'inherit' })
+    if (res.status !== 0 || res.signal) {
+      console.error(
+        `\ngenerate.mjs: chunk [${start}, ${start + n}) failed ` +
+        `(exit ${res.status}, signal ${res.signal || 'none'}) — ` +
+        `${res.signal === 'SIGKILL' ? 'likely OOM-killed; try a smaller --chunk' : 'see output above'}.` +
+        `\nStopping — dataset in ${OUT} is INCOMPLETE, do not train on it.`
+      )
+      process.exit(1)
+    }
+  }
+  console.log(`all chunks done in ${((Date.now() - t0) / 1000).toFixed(0)}s`)
+  verifyComplete(0, COUNT, OUT)
+}
+
+// Fail loudly and non-zero if any expected file is missing — a partial
+// dataset must never be mistaken for a complete one by a calling script.
+function verifyComplete(start, count, out) {
+  const found = globSync(join(out, 'img_*.png')).length
+  if (found !== count) {
+    console.error(`generate.mjs: expected ${count} images in ${out}, found ${found}. Dataset is INCOMPLETE.`)
+    process.exit(1)
+  }
+  console.log(`done → ${out} (${count} samples verified)`)
+}
