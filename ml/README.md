@@ -36,7 +36,15 @@ noise, contrast, grayscale) so it survives phone photos and old scans.
 
 ### Easiest: one-click Colab (free GPU, no setup)
 
-Open **[`ml/colab_train.ipynb`](https://colab.research.google.com/github/tiienn/stride/blob/main-uiyymm/ml/colab_train.ipynb)** in Google Colab, set the runtime to a T4 GPU (Runtime → Change runtime type → T4 GPU), then **Runtime → Run all**. It clones the repo, generates the dataset, trains, previews a prediction, exports ONNX, and downloads `best.pt` + `stride-planseg.onnx`. Lower `SAMPLES`/`EPOCHS` in the config cell for a quick end-to-end test first.
+Open **[`ml/colab_train.ipynb`](https://colab.research.google.com/github/tiienn/stride/blob/main-uiyymm/ml/colab_train.ipynb)** in Google Colab, set the runtime to a T4 GPU (Runtime → Change runtime type → T4 GPU), then **Runtime → Run all**. It clones the repo, generates the dataset, trains, previews a prediction, exports ONNX, and saves `best.pt` + `stride-planseg.onnx` to your Google Drive. Lower `SAMPLES`/`EPOCHS` in the config cell for a quick end-to-end test first.
+
+Colab's paid tiers (needed once the free daily GPU quota runs out) are only available in [a specific list of countries](https://research.google.com/colaboratory/faq.html) — if yours isn't on it, payment simply won't go through no matter what card/billing details you enter. Use the Kaggle notebook below instead in that case.
+
+### Alternative: Kaggle Notebooks (free GPU, no payment method, no country restriction)
+
+On [kaggle.com/code](https://www.kaggle.com/code), click **New Notebook**, then **File → Import Notebook → GitHub** and paste this repo's URL to `ml/kaggle_train.ipynb` (or download the file and use **Import Notebook → Upload** instead). Enable **Settings → Accelerator → GPU** and **Settings → Internet → On** in the panel on the right, then **Run All**.
+
+Same pipeline as the Colab notebook, adapted for Kaggle's environment: it installs Node.js explicitly (Kaggle's base image doesn't ship it, unlike Colab's), works out of `/kaggle/working/` instead of `/content/`, and skips the Drive step entirely — the final cell collects both output files into `/kaggle/working/stride-model/`, downloadable straight from Kaggle's Output/file-browser pane. Kaggle gives every account roughly 30 hours/week of free GPU (T4 x2 or P100), no billing information required. First-time GPU/Internet use may require a one-time phone verification, unrelated to Stride.
 
 ### Or locally / on your own GPU
 
