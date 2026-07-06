@@ -107,20 +107,48 @@ function buildStaticLayer(plan, dpr, size, { labels = false } = {}) {
         ctx.stroke()
       }
     }
-    // windows as light ticks across the wall line
-    if (labels) {
-      ctx.strokeStyle = 'rgba(150, 200, 255, 0.8)'
-      for (const wall of plan.walls) {
-        const len = Math.hypot(wall.end.x - wall.start.x, wall.end.z - wall.start.z)
-        if (len < 0.01) continue
-        const ux = (wall.end.x - wall.start.x) / len
-        const uz = (wall.end.z - wall.start.z) / len
-        ctx.lineWidth = Math.max(1.5, wall.thickness * scale * 0.5)
-        for (const o of wall.openings) {
-          if (o.type !== 'window') continue
+    // openings: windows as bright blue bars over the wall line, doors as
+    // amber markers in their gaps (swing arcs when the map is big enough)
+    for (const wall of plan.walls) {
+      const len = Math.hypot(wall.end.x - wall.start.x, wall.end.z - wall.start.z)
+      if (len < 0.01) continue
+      const ux = (wall.end.x - wall.start.x) / len
+      const uz = (wall.end.z - wall.start.z) / len
+      for (const o of wall.openings) {
+        const a = o.position - o.width / 2
+        const b = o.position + o.width / 2
+        if (o.type === 'window') {
+          ctx.strokeStyle = '#7cb8ff'
+          ctx.lineWidth = Math.max(2, wall.thickness * scale)
           ctx.beginPath()
-          ctx.moveTo(X(wall.start.x + ux * (o.position - o.width / 2)), Z(wall.start.z + uz * (o.position - o.width / 2)))
-          ctx.lineTo(X(wall.start.x + ux * (o.position + o.width / 2)), Z(wall.start.z + uz * (o.position + o.width / 2)))
+          ctx.moveTo(X(wall.start.x + ux * a), Z(wall.start.z + uz * a))
+          ctx.lineTo(X(wall.start.x + ux * b), Z(wall.start.z + uz * b))
+          ctx.stroke()
+        } else if (labels && (o.type === 'door' || o.type === 'entrance') && o.width * scale > 9) {
+          // plan-style door symbol: leaf + quarter swing arc from the hinge
+          const hx = X(wall.start.x + ux * a)
+          const hz = Z(wall.start.z + uz * a)
+          const r = o.width * scale
+          const theta = Math.atan2(uz, ux) // canvas y == world z, north-up
+          ctx.strokeStyle = 'rgba(232, 183, 74, 0.9)'
+          ctx.lineWidth = Math.max(1.2, scale * 0.05)
+          ctx.beginPath()
+          ctx.moveTo(hx, hz)
+          ctx.lineTo(hx + Math.cos(theta - Math.PI / 2) * r, hz + Math.sin(theta - Math.PI / 2) * r)
+          ctx.stroke()
+          ctx.beginPath()
+          ctx.arc(hx, hz, r, theta - Math.PI / 2, theta)
+          ctx.stroke()
+        } else {
+          // small map (or plain doorway): amber bar so the gap reads as a
+          // passage, not a hole in the detection
+          ctx.strokeStyle = o.type === 'doorway'
+            ? 'rgba(232, 183, 74, 0.35)'
+            : 'rgba(232, 183, 74, 0.75)'
+          ctx.lineWidth = Math.max(1.5, wall.thickness * scale * 0.6)
+          ctx.beginPath()
+          ctx.moveTo(X(wall.start.x + ux * a), Z(wall.start.z + uz * a))
+          ctx.lineTo(X(wall.start.x + ux * b), Z(wall.start.z + uz * b))
           ctx.stroke()
         }
       }

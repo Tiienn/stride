@@ -61,7 +61,7 @@ async function loadBitmap(file) {
 // Shown in sequence while the Claude call is in flight, so a 20-60s wait
 // reads as progress instead of a frozen line.
 const ANALYSIS_STAGES = [
-  'Claude is reading the plan…',
+  'Stride is reading the plan…',
   'Classifying it — floor plan, office or site…',
   'Tracing every wall, corner to corner…',
   'Finding doors, doorways and windows…',
@@ -111,25 +111,27 @@ function geometryQualityOf(analysis) {
   }
 }
 
-function buildHybrid(local, claude) {
-  return {
-    ...claude,
-    walls: unionWalls(local.walls, claude.walls),
-    doors: local.doors,
-    windows: local.windows,
-    imageSize: local.imageSize,
+// Three candidate worlds, best one wins: the model's geometry alone, the
+// model's geometry + Claude's walls unioned in (recovers model-missed walls,
+// but can also import a Claude hallucination like a balcony railing read as
+// walls), and Claude's geometry alone. Ties break toward the earlier
+// candidate — model precision first.
+function pickGeometry(local, claude) {
+  const hybridBase = { ...claude, doors: local.doors, windows: local.windows, imageSize: local.imageSize }
+  const candidates = [
+    { label: 'model+union', analysis: { ...hybridBase, walls: unionWalls(local.walls, claude.walls) } },
+    { label: 'model', analysis: { ...hybridBase, walls: local.walls } },
+    { label: 'claude', analysis: claude },
+  ]
+  let best = null
+  for (const c of candidates) {
+    c.q = geometryQualityOf(c.analysis)
+    if (!best || c.q > best.q) best = c
   }
-}
-
-function hybridBeatsClaude(local, claude) {
-  try {
-    const qHybrid = geometryQuality(analysisToScenePlan(buildHybrid(local, claude)))
-    const qClaude = geometryQuality(analysisToScenePlan(claude))
-    if (import.meta.env.DEV) console.info(`[stride] geometry quality — neural net: ${qHybrid.toFixed(3)}, claude: ${qClaude.toFixed(3)}`)
-    return qHybrid >= qClaude
-  } catch {
-    return false
+  if (import.meta.env.DEV) {
+    console.info('[stride] geometry quality — ' + candidates.map((c) => `${c.label}: ${c.q.toFixed(3)}`).join(', '))
   }
+  return best
 }
 
 export async function analyzeUpload(file, onStatus, signal) {
@@ -171,18 +173,17 @@ export async function analyzeUpload(file, onStatus, signal) {
   const local = await localPromise
   const localUsable = isUsableGeometry(local)
 
+  // Which geometry builds the best world? (Claude's room centers are in the
+  // same pixel space as the model's walls — both saw the same prepared image.)
+  const picked = claude && claude.planType !== 'site' && localUsable ? pickGeometry(local, claude) : null
+
   let analysis
   if (claude && claude.planType === 'site') {
     // site plans have no walls to segment — Claude owns them end to end
     analysis = claude
-  } else if (claude && localUsable && hybridBeatsClaude(local, claude)) {
-    // the hybrid: model geometry (plus Claude walls the model missed —
-    // unionWalls), Claude semantics. Claude's room centers are in the same
-    // pixel space (both saw the same prepared image). Gated: on plan styles
-    // the model wasn't trained on it fragments (furniture read as wall
-    // stubs), and then Claude's geometry is the better world.
-    analysis = buildHybrid(local, claude)
-    onStatus?.('Merging neural-net geometry with Claude’s reading…')
+  } else if (claude && picked && picked.label !== 'claude') {
+    analysis = picked.analysis
+    onStatus?.('Merging Stride’s two readings of your plan…')
   } else if (claude) {
     // model unavailable/uncertain → Claude-only, with its verification pass
     analysis = claude

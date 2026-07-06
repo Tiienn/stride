@@ -72,7 +72,7 @@ export default function Landing() {
           </div>
           <h2>Reading your plan</h2>
           <p className="status">{analysisStatus}</p>
-          <p className="fine">Claude is tracing walls, doors, rooms and scale — usually 20–60 seconds.</p>
+          <p className="fine">Stride is tracing walls, doors, rooms and scale — usually 20–60 seconds.</p>
           <button
             className="cancel-btn"
             onClick={() => { audio.uiClick(); abortRef.current?.abort() }}
