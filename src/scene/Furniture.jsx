@@ -5,6 +5,7 @@ import { useEffect, useMemo } from 'react'
 import * as P from './furniture/pieces.jsx'
 import { roomConfig } from '../lib/roomTypes.js'
 import { registerCollider } from '../lib/interact.js'
+import { repairCirculation } from '../lib/circulation.js'
 
 // Deterministic per-room randomness — same plan always furnishes the same way
 function rng(seedStr) {
@@ -403,6 +404,9 @@ export default function Furniture({ plan }) {
       const info = analyzeRoom(plan, room)
       const placer = makePlacer(plan, room, info, rng(room.id + plan.name))
       layout(placer, room)
+      // walkability guarantee: every door of the room must stay reachable by
+      // the player capsule — evict furniture that pinches the circulation
+      repairCirculation(plan, room, placer.items)
       out.push(...placer.items)
     }
     if (import.meta.env.DEV) window.__strideFurniture = out

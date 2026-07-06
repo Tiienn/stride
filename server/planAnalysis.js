@@ -122,22 +122,79 @@ const ANALYSIS_TOOL = {
   },
 }
 
-const SYSTEM_PROMPT = `You are an expert architectural plan analyzer. You extract precise structured data from 2D plan images for 3D reconstruction.
+const SYSTEM_PROMPT = `You are an expert architectural plan analyzer. You extract precise structured data from 2D plan images for 3D reconstruction. A person will literally WALK through the 3D model built from your output — every wall you miss becomes a hole in their world, every wall you invent blocks their path, and every door you miss seals a room forever.
 
 CRITICAL RULES:
 1. All coordinates are PIXELS from the image's top-left corner.
-2. Walls are defined by their CENTER LINE, not edges.
+2. Walls are defined by their CENTER LINE, not edges. One wall = ONE segment. Never trace the two drawn faces of a wall as two separate parallel segments.
 3. First classify the plan: an interior floor plan (residential or office) vs a site/land plan (parcel boundary, plot). Site plans show property lines, lot dimensions, north arrows, setbacks, roads — not interior walls.
-4. For interior plans: trace EVERY wall segment corner to corner. Exterior walls are thicker (15-25px typical) than interior (8-15px). Do not skip short segments. Wall endpoints that meet must share identical coordinates.
-5. Doors: quarter-circle arc = hinged door. Gap with no arc = doorway. The building's main entry door has kind "entrance".
-6. Windows: short parallel lines / thin rectangles crossing exterior walls.
-7. Scale, in priority order: (a) printed dimension labels — bare numbers like 3670 are MILLIMETERS, decimals like 5.37 are METERS; (b) printed total area worked backward; (c) standard door width 0.9m; (d) estimate. Report source and confidence honestly.
-8. Room centers must be INSIDE the room, far from any wall — they seed a flood fill.
-9. Site plans: trace the parcel boundary polygon precisely, note the road-facing edge if drawn.
+4. Doors: quarter-circle arc = hinged door. Gap with no arc = doorway. The building's main entry door has kind "entrance". Real doors are 0.7–1.0 m wide — sanity-check your pixel widths against the scale.
+5. Windows: short parallel lines / thin rectangles crossing exterior walls.
+6. Scale, in priority order: (a) printed dimension labels — bare numbers like 3670 are MILLIMETERS, decimals like 5.37 are METERS; (b) printed total area worked backward; (c) standard door width 0.9m; (d) estimate. Report source and confidence honestly.
+7. Room centers must be INSIDE the room, far from any wall — they seed a flood fill.
+8. Site plans: trace the parcel boundary polygon precisely, note the road-facing edge if drawn.
+
+METHOD for interior plans — work systematically, do not eyeball the whole drawing at once:
+A. Read every text label and printed dimension first; establish the scale.
+B. List every room you can identify (from labels, or from fixtures: a room with a toilet symbol is a bathroom, with a counter run a kitchen). Include closets, hallways, balconies — small rooms count.
+C. Trace the building's exterior outline as a CLOSED loop of wall segments. Exterior walls are the thick ones (15–25 px typical).
+D. Then trace the interior partition walls room by room (8–15 px typical). Every wall endpoint must either share exact coordinates with another wall's endpoint (corner) or land exactly ON another wall's line (T-junction). A floating, unconnected wall end is almost always a tracing error — reconsider it.
+E. Walk your room list: every room MUST have at least one door or open doorway in its walls. If a room in your extraction has none, you missed an opening — look again at gaps and arcs along that room's walls before recording.
+F. Openings sit INSIDE walls: a door's center must lie on a wall segment you traced, with wall continuing on both sides (or ending at a corner).
+
+DO NOT trace as walls: furniture, kitchen counters, wardrobes, stairs, dimension lines, extension lines, hatching, text, door leaves or their swing arcs. If a "wall" is thinner than every other line and touches nothing, it is probably a dimension line.
+
 Record your analysis with the record_plan_analysis tool. Be exhaustive with walls — a missed wall ruins the 3D model.`
 
-export async function analyzePlanImage(body, { apiKey, model } = {}) {
-  if (!apiKey) {
+// Second pass: the model reviews its own extraction against the image and
+// returns a small diff of corrections — much cheaper/faster than re-emitting
+// the full analysis, which matters inside serverless time budgets.
+const CORRECTIONS_TOOL = {
+  name: 'record_plan_corrections',
+  description: 'Record corrections to a previous plan analysis after re-checking it against the image.',
+  input_schema: {
+    type: 'object',
+    required: ['summary'],
+    properties: {
+      summary: { type: 'string', description: 'One or two sentences on what was wrong, or "extraction verified" if nothing.' },
+      missedWalls: { type: 'array', description: 'Walls present in the image but absent from the analysis.', items: ANALYSIS_TOOL.input_schema.properties.walls.items },
+      falseWallIndexes: { type: 'array', description: '0-based indexes into the analysis walls array of walls that do NOT exist in the image (furniture, dimension lines, double-traced faces).', items: { type: 'number' } },
+      adjustedWalls: {
+        type: 'array',
+        description: 'Walls whose endpoints are significantly wrong (off by more than ~15px).',
+        items: {
+          type: 'object',
+          required: ['index', 'start', 'end'],
+          properties: {
+            index: { type: 'number' },
+            start: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            end: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+          },
+        },
+      },
+      missedDoors: { type: 'array', items: ANALYSIS_TOOL.input_schema.properties.doors.items },
+      falseDoorIndexes: { type: 'array', items: { type: 'number' } },
+      missedWindows: { type: 'array', items: ANALYSIS_TOOL.input_schema.properties.windows.items },
+      falseWindowIndexes: { type: 'array', items: { type: 'number' } },
+      missedRooms: { type: 'array', items: ANALYSIS_TOOL.input_schema.properties.rooms.items },
+      scaleCorrection: ANALYSIS_TOOL.input_schema.properties.scale,
+    },
+  },
+}
+
+const REFINE_SYSTEM_PROMPT = `You are re-checking a structured extraction of an architectural plan against the original image. The extraction will drive a walkable 3D model, so errors have physical consequences: a missed wall is a hole, an invented wall blocks a corridor, a missed door seals a room.
+
+Check, in order:
+1. FALSE WALLS: walls in the extraction that are actually furniture, counters, stairs, dimension lines, text, door swing arcs — or a second trace of a wall already listed (two parallel segments ~one wall-thickness apart along the same span are one double-traced wall: keep one index, report the other as false).
+2. MISSED WALLS: real walls absent from the extraction. Compare room by room — every room on the drawing must be fully enclosed by extracted walls (with doors as the only gaps).
+3. DOORS: every room must be reachable — each room needs at least one door/doorway in the extraction. Find the openings for any sealed room. Also drop doors that don't exist.
+4. ROOMS: any labeled or clearly-drawn room missing from the extraction's room list.
+5. SCALE: spot-check one printed dimension against its pixel length; correct the scale if it's off by more than ~10%. Bare numbers like 3670 are millimeters.
+
+Report ONLY genuine discrepancies — do not nudge coordinates that are roughly right. If the extraction is faithful, record an empty correction with summary "extraction verified". Always respond via the record_plan_corrections tool.`
+
+export async function analyzePlanImage(body, opts = {}) {
+  if (!opts.apiKey) {
     const err = new Error(
       'No ANTHROPIC_API_KEY configured on the server. Add it to .env (local) or your Vercel env vars — or use a sample plan, which needs no key.'
     )
@@ -150,11 +207,14 @@ export async function analyzePlanImage(body, { apiKey, model } = {}) {
     err.statusCode = 400
     throw err
   }
+  if (body.phase === 'refine') return refinePlanAnalysis(body, opts)
+  const { apiKey, model } = opts
 
   const client = new Anthropic({ apiKey })
   const response = await client.messages.create({
     model: model || DEFAULT_MODEL,
     max_tokens: 16000,
+    temperature: 0, // extraction, not creativity — same plan must give the same walls
     system: SYSTEM_PROMPT,
     tools: [ANALYSIS_TOOL],
     tool_choice: { type: 'tool', name: 'record_plan_analysis' },
@@ -182,4 +242,81 @@ export async function analyzePlanImage(body, { apiKey, model } = {}) {
     throw err
   }
   return { analysis: toolUse.input, model: response.model, usage: response.usage }
+}
+
+// Verification pass: show the model the image again alongside its own
+// first-pass extraction (with indexes), collect a correction diff, and merge
+// it into the analysis. Runs as a separate request so each pass gets its own
+// serverless time budget.
+async function refinePlanAnalysis(body, { apiKey, model }) {
+  const { image, mediaType, analysis } = body
+  if (!analysis || typeof analysis !== 'object') {
+    const err = new Error('Missing analysis to refine')
+    err.statusCode = 400
+    throw err
+  }
+
+  const indexed = {
+    ...analysis,
+    walls: (analysis.walls || []).map((w, i) => ({ index: i, ...w })),
+    doors: (analysis.doors || []).map((d, i) => ({ index: i, ...d })),
+    windows: (analysis.windows || []).map((w, i) => ({ index: i, ...w })),
+  }
+
+  const client = new Anthropic({ apiKey })
+  const response = await client.messages.create({
+    model: model || DEFAULT_MODEL,
+    max_tokens: 8000,
+    temperature: 0,
+    system: REFINE_SYSTEM_PROMPT,
+    tools: [CORRECTIONS_TOOL],
+    tool_choice: { type: 'tool', name: 'record_plan_corrections' },
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: image },
+          },
+          {
+            type: 'text',
+            text: `Here is the extraction to verify against the image above (elements carry their index):\n\n${JSON.stringify(indexed)}\n\nRe-check it per your instructions and record the corrections.`,
+          },
+        ],
+      },
+    ],
+  })
+
+  const toolUse = response.content.find((c) => c.type === 'tool_use')
+  if (!toolUse) {
+    const err = new Error('Model returned no corrections')
+    err.statusCode = 502
+    throw err
+  }
+  return {
+    analysis: applyCorrections(analysis, toolUse.input),
+    corrections: toolUse.input.summary,
+    model: response.model,
+    usage: response.usage,
+  }
+}
+
+function applyCorrections(analysis, c) {
+  const dropByIndex = (arr, indexes) => {
+    const drop = new Set((indexes || []).filter((i) => Number.isInteger(i)))
+    return (arr || []).filter((_, i) => !drop.has(i))
+  }
+  const walls = (analysis.walls || []).map((w, i) => {
+    const adj = (c.adjustedWalls || []).find((a) => a?.index === i && a.start && a.end)
+    return adj ? { ...w, start: adj.start, end: adj.end } : w
+  })
+  return {
+    ...analysis,
+    walls: [...dropByIndex(walls, c.falseWallIndexes), ...(c.missedWalls || [])],
+    doors: [...dropByIndex(analysis.doors, c.falseDoorIndexes), ...(c.missedDoors || [])],
+    windows: [...dropByIndex(analysis.windows, c.falseWindowIndexes), ...(c.missedWindows || [])],
+    rooms: [...(analysis.rooms || []), ...(c.missedRooms || [])],
+    scale: c.scaleCorrection?.pixelsPerMeter > 0 ? c.scaleCorrection : analysis.scale,
+  }
 }

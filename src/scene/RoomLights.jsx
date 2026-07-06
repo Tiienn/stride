@@ -251,7 +251,7 @@ export default function RoomLights({ plan }) {
   const placements = useMemo(() => switchPlacements(plan), [plan])
   return (
     <group>
-      {plan.rooms.map((room) => (
+      {plan.rooms.filter((room) => !room.outdoor).map((room) => (
         <group key={room.id}>
           <Fixture room={room} on={!!roomLights[room.id]} />
           {placements.has(room.id) && <Switch placement={placements.get(room.id)} room={room} />}

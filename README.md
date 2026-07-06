@@ -45,7 +45,8 @@ local dev. Set `ANTHROPIC_API_KEY` in the Vercel project env vars and deploy.
 | Mouse | look |
 | Shift | run |
 | E or click | open/close doors, flip light switches |
-| Esc | release the mouse |
+| M (or click the minimap) | expand the plan map full-screen — room names and areas labeled |
+| Esc | release the mouse / close the map |
 | Touch devices | left thumb joystick to move, right thumb drag to look, tap to interact |
 
 The HUD tracks your **steps and distance** (that's how a body understands a space), names the
@@ -80,14 +81,27 @@ embedded browsers), Stride falls back to drag-to-look automatically.
 ## How it works
 
 ```
-image ──► /api/analyze (Claude vision, forced tool-call JSON)
-              │  walls, doors, windows, rooms, dimensions, scale,
-              │  plan type (floor / office / site), site boundary
+image ──┬─► in-browser neural net (ONNX U-Net, trained on synthetic plans)
+        │       walls, doors, windows — pixel-precise, free, offline
+        │       (src/lib/planseg.js + maskVectorize.js; model from the
+        │        model-v1 GitHub release via scripts/fetch-model.mjs)
+        │
+        └─► /api/analyze (Claude vision, forced tool-call JSON)
+                room names/types, plan type, scale from printed
+                dimensions, site boundaries
+              │
+              ▼  merge: model geometry + Claude semantics
+              │  (Claude-only + refine pass if the model is unsure;
+              │   model-only if there's no API key — uploads still work)
               ▼
       src/lib/planProcess.js
               │  px→meters, wall snapping/merging/axis alignment,
+              │  double-trace merging, T-junction gap closing,
+              │  scale cross-check against door widths,
               │  scale fallbacks (labels → door width → estimate),
-              │  10 cm grid flood-fill → real room footprints
+              │  10 cm grid flood-fill → real room footprints,
+              │  passable door widths, doorways punched into any
+              │  room the connectivity graph says you couldn't enter
               ▼
           ScenePlan  ◄─── also produced directly by bundled samples
               │
