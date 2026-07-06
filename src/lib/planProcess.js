@@ -37,6 +37,36 @@ export function analysisToScenePlan(analysis) {
   if (analysis.planType === 'site') return siteAnalysisToScenePlan(analysis)
 
   const ppm = crossCheckScale(resolveScale(analysis), analysis)
+  let plan = buildInterior(analysis, ppm)
+
+  // Area calibration: plans routinely print each room's area ("21.4 m²").
+  // Comparing the printed labels against the flood-filled built areas gives
+  // an exact correction for any residual scale error — the labels are ground
+  // truth in a way pixel measurements never are.
+  const k = areaCalibrationFactor(plan.rooms)
+  if (k) {
+    plan = buildInterior(analysis, ppm / k)
+    plan.scaleInfo = { pixelsPerMeter: ppm / k, confidence: 0.95, source: 'area_calibrated' }
+  }
+  return plan
+}
+
+// Median sqrt(labeledArea / builtArea) over labeled rooms — the linear factor
+// the world is off by. Null when there's nothing trustworthy to calibrate on.
+function areaCalibrationFactor(rooms) {
+  const ratios = (rooms || [])
+    .filter((r) => r.labeledArea > 0.5 && r.area > 0.5)
+    .map((r) => r.labeledArea / r.area)
+    // a single wildly-off pair is a mislabel or a room-matching failure
+    .filter((q) => q > 0.25 && q < 4)
+    .sort((a, b) => a - b)
+  if (!ratios.length) return null
+  const k = Math.sqrt(ratios[Math.floor(ratios.length / 2)])
+  if (!(k > 0.5 && k < 2)) return null
+  return Math.abs(k - 1) > 0.03 ? k : null
+}
+
+function buildInterior(analysis, ppm) {
   const size = analysis.imageSize || guessImageSize(analysis)
   const cx = size.width / 2
   const cy = size.height / 2
