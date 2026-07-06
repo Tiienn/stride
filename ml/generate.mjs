@@ -14,7 +14,7 @@
 // fills, door arcs, fonts, dimension lines, furniture distractors, paper
 // grids — is randomized per sample so the model learns geometry, not style.
 
-import { existsSync, globSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -716,7 +716,10 @@ if (args._worker || COUNT <= CHUNK) {
 // Fail loudly and non-zero if any expected file is missing — a partial
 // dataset must never be mistaken for a complete one by a calling script.
 function verifyComplete(start, count, out) {
-  const found = globSync(join(out, 'img_*.png')).length
+  // readdirSync, not fs.globSync — the latter is Node 22+ only and Colab
+  // ships Node 20, where it's undefined and would throw here at the finish
+  // line (exactly the failure this comment now prevents).
+  const found = readdirSync(out).filter((f) => f.startsWith('img_') && f.endsWith('.png')).length
   if (found !== count) {
     console.error(`generate.mjs: expected ${count} images in ${out}, found ${found}. Dataset is INCOMPLETE.`)
     process.exit(1)
