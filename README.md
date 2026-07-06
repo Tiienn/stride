@@ -45,7 +45,8 @@ local dev. Set `ANTHROPIC_API_KEY` in the Vercel project env vars and deploy.
 | Mouse | look |
 | Shift | run |
 | E or click | open/close doors, flip light switches |
-| Esc | release the mouse |
+| M (or click the minimap) | expand the plan map full-screen — room names and areas labeled |
+| Esc | release the mouse / close the map |
 | Touch devices | left thumb joystick to move, right thumb drag to look, tap to interact |
 
 The HUD tracks your **steps and distance** (that's how a body understands a space), names the

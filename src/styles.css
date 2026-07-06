@@ -367,8 +367,67 @@ select.chip option { background: var(--bg-raise); }
   bottom: 18px;
   padding: 6px;
   line-height: 0;
+  cursor: zoom-in;
+  z-index: 12; /* clickable above the 3D canvas in every look mode */
 }
 .minimap canvas { border-radius: 8px; }
+.minimap-expand {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  font-size: 13px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.45);
+  transition: color 0.15s;
+}
+.minimap:hover .minimap-expand { color: rgba(255, 255, 255, 0.9); }
+
+.minimap-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 9, 12, 0.62);
+  backdrop-filter: blur(4px);
+  pointer-events: auto;
+  cursor: zoom-out;
+}
+.minimap-overlay-card {
+  position: relative;
+  padding: 10px;
+  line-height: 0;
+  cursor: default;
+}
+.minimap-overlay-card canvas { border-radius: 10px; max-width: 92vw; max-height: 86vh; }
+.minimap-close {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(24, 26, 32, 0.95);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.minimap-close:hover { background: rgba(50, 54, 64, 0.95); }
+.minimap-overlay-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -30px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.6);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
 
 .resume-bar {
   position: absolute;
