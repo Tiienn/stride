@@ -40,7 +40,8 @@ export function buildWallGeometry(plan) {
     const uz = (wall.end.z - wall.start.z) / len
     const at = (t, y) => [wall.start.x + ux * t, y, wall.start.z + uz * t]
     const T = wall.thickness
-    const H = wall.height
+    // a balcony/terrace parapet is a low solid wall open to the sky
+    const H = wall.railing ? 1.05 : wall.height
 
     const openings = [...wall.openings].sort((a, b) => a.position - b.position)
     let cursor = 0

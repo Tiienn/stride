@@ -650,6 +650,7 @@ export function finalizeInteriorPlan(partial) {
   })
 
   repairRoomAccess(walls, finalRooms, grid)
+  markOutdoorRooms(walls, finalRooms, grid)
 
   const spawn = interiorSpawn(finalRooms, grid)
   return {
@@ -931,6 +932,121 @@ function repairRoomAccess(walls, rooms, grid) {
       break
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Outdoor rooms — balconies, terraces, patios are open to the sky: their
+// walls against the void are railings, not full walls, and they get no
+// ceiling or ceiling fixtures. The 3D layer reads room.outdoor and
+// wall.railing to render this.
+// ---------------------------------------------------------------------------
+
+const OUTDOOR_ROOM = /balcon|terrace|terrasse|patio|deck|veranda|porch|loggia/i
+
+function markOutdoorRooms(walls, rooms, grid) {
+  const outdoorIdx = new Set()
+  for (const r of rooms) {
+    if (r.type === 'balcony' || OUTDOOR_ROOM.test(r.name || '')) {
+      r.outdoor = true
+      outdoorIdx.add(r.gridIndex)
+    }
+  }
+  if (!outdoorIdx.size) return
+  const regionAt = (x, z) => {
+    const { cx, cy } = worldToCell(grid, x, z)
+    if (cx < 0 || cy < 0 || cx >= grid.w || cy >= grid.h) return -2
+    return grid.cells[cy * grid.w + cx]
+  }
+  for (const w of walls) {
+    const len = dist2d(w.start, w.end)
+    if (len < 0.05) continue
+    const ux = (w.end.x - w.start.x) / len
+    const uz = (w.end.z - w.start.z) / len
+    let railing = 0
+    let solid = 0
+    for (let s = Math.min(0.25, len / 2); s <= len - 0.2; s += 0.35) {
+      const px = w.start.x + ux * s
+      const pz = w.start.z + uz * s
+      const sides = [1, -1].map((sign) => {
+        for (const off of [w.thickness / 2 + 0.2, w.thickness / 2 + 0.4]) {
+          const v = regionAt(px - uz * off * sign, pz + ux * off * sign)
+          if (v !== -1) return v
+        }
+        return -1
+      })
+      const out = sides.filter((v) => outdoorIdx.has(v)).length
+      const voidSide = sides.filter((v) => v === -2).length
+      if ((out === 1 && voidSide === 1) || out === 2) railing++
+      else if (sides.some((v) => v >= 0 && !outdoorIdx.has(v))) solid++
+    }
+    if (railing > 0 && railing >= solid * 2) {
+      w.railing = true
+      // a parapet has no windows or doors — keep render, collision and
+      // minimap consistent by dropping any openings detected in it
+      w.openings = []
+    }
+  }
+}
+
+// Ceiling footprint when outdoor rooms exist: every cell that is wall or an
+// INDOOR room, greedily decomposed into few large rects (world units).
+export function ceilingRects(plan) {
+  const grid = plan.grid
+  if (!grid) return null
+  const outdoor = new Set(plan.rooms.filter((r) => r.outdoor).map((r) => r.gridIndex))
+  if (!outdoor.size) return null
+  // railing wall cells are open sky too — a 1m parapet has no roof over it
+  const railMask = new Uint8Array(grid.w * grid.h)
+  for (const wall of plan.walls) {
+    if (!wall.railing) continue
+    const half = wall.thickness / 2 + 0.02
+    const len = dist2d(wall.start, wall.end)
+    const steps = Math.max(1, Math.ceil(len / (CELL * 0.5)))
+    const r = Math.ceil(half / CELL) + 1
+    for (let i = 0; i <= steps; i++) {
+      const px = wall.start.x + (wall.end.x - wall.start.x) * (i / steps)
+      const pz = wall.start.z + (wall.end.z - wall.start.z) * (i / steps)
+      const c = worldToCell(grid, px, pz)
+      for (let oy = -r; oy <= r; oy++) {
+        for (let ox = -r; ox <= r; ox++) {
+          const cx = c.cx + ox, cy = c.cy + oy
+          if (cx < 0 || cy < 0 || cx >= grid.w || cy >= grid.h) continue
+          const wx = grid.originX + (cx + 0.5) * CELL
+          const wz = grid.originZ + (cy + 0.5) * CELL
+          if (projectOnSegment({ x: wx, z: wz }, wall.start, wall.end).d <= half) {
+            railMask[cy * grid.w + cx] = 1
+          }
+        }
+      }
+    }
+  }
+  const keep = (v, idx) => !railMask[idx] && (v === -1 || (v >= 0 && !outdoor.has(v)))
+  const used = new Uint8Array(grid.w * grid.h)
+  const rects = []
+  for (let y = 0; y < grid.h; y++) {
+    for (let x = 0; x < grid.w; x++) {
+      const idx = y * grid.w + x
+      if (used[idx] || !keep(grid.cells[idx], idx)) continue
+      let w = 1
+      while (x + w < grid.w && !used[idx + w] && keep(grid.cells[idx + w], idx + w)) w++
+      let h = 1
+      outer: while (y + h < grid.h) {
+        for (let i = 0; i < w; i++) {
+          const j = (y + h) * grid.w + x + i
+          if (used[j] || !keep(grid.cells[j], j)) break outer
+        }
+        h++
+      }
+      for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) used[(y + yy) * grid.w + x + xx] = 1
+      rects.push({
+        x: grid.originX + x * CELL,
+        z: grid.originZ + y * CELL,
+        w: w * CELL,
+        d: h * CELL,
+      })
+    }
+  }
+  return rects
 }
 
 // Best place to punch a doorway between `region` and any reachable region:
