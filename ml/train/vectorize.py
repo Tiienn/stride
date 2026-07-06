@@ -90,8 +90,20 @@ def _openings(class_mask, cls, min_px=4):
         out.append({
             "center": {"x": float(xs.mean()), "y": float(ys.mean())},
             "width": float(max(w, h)),
+            "bbox": (int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())),
+            "n": int(len(ys)),
         })
     return out
+
+
+def _touches_class(class_mask, comp, cls, frac, pad=3):
+    """True if the pad-expanded bbox contains >= frac of the component's own
+    pixel count in class `cls` — detects fragments hugging another class
+    (e.g. door specks fringing a window). Keep in sync with maskVectorize.js."""
+    h, w = class_mask.shape
+    x0, x1, y0, y1 = comp["bbox"]
+    region = class_mask[max(0, y0 - pad):min(h, y1 + pad + 1), max(0, x0 - pad):min(w, x1 + pad + 1)]
+    return (region == cls).sum() >= max(4, comp["n"] * frac)
 
 
 def mask_to_analysis(class_mask: np.ndarray) -> dict:
@@ -136,8 +148,15 @@ def mask_to_analysis(class_mask: np.ndarray) -> dict:
     med_thick = thicknesses[len(thicknesses) // 2] if thicknesses else 8
     min_open = max(16, med_thick * 1.2)
 
-    doors = [{**o, "kind": "hinged"} for o in _openings(class_mask, 2) if o["width"] >= min_open]
-    windows = [o for o in _openings(class_mask, 3) if o["width"] >= min_open * 0.6]
+    doors = [
+        {"center": o["center"], "width": o["width"], "kind": "hinged"}
+        for o in _openings(class_mask, 2)
+        if o["width"] >= min_open and not _touches_class(class_mask, o, 3, 0.25)
+    ]
+    windows = [
+        {"center": o["center"], "width": o["width"]}
+        for o in _openings(class_mask, 3) if o["width"] >= min_open * 0.6
+    ]
 
     return {
         "planType": "floor_residential",

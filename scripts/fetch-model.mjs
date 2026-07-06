@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const MODEL_URL = 'https://github.com/tiienn/stride/releases/download/model-v1/stride-planseg.onnx'
+const MODEL_URL = 'https://github.com/tiienn/stride/releases/download/model-v2/stride-planseg.onnx'
 const MODEL_PATH = join(root, 'public/models/stride-planseg.onnx')
 const MODEL_MIN_BYTES = 25_000_000 // guard against committed HTML error pages
 

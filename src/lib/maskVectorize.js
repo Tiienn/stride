@@ -60,9 +60,16 @@ export function maskToAnalysis(classMask, w, h) {
   const medThick = thicknesses.length ? thicknesses[Math.floor(thicknesses.length / 2)] : 8
   const minOpen = Math.max(16, medThick * 1.2)
 
-  const doors = openings(classMask, w, h, 2).filter((o) => o.width >= minOpen)
-    .map((o) => ({ ...o, kind: 'hinged' }))
-  const windows = openings(classMask, w, h, 3).filter((o) => o.width >= minOpen * 0.6)
+  const doors = openings(classMask, w, h, 2)
+    .filter((o) => o.width >= minOpen)
+    // glazing-edge filter: models trained on sliding doors learn to fringe
+    // window ends with small door-class patches. A "door" whose surroundings
+    // contain substantial window pixels is that fringe, not a door.
+    .filter((o) => !touchesClass(classMask, w, h, o, 3, 0.25))
+    .map((o) => ({ center: o.center, width: o.width, kind: 'hinged' }))
+  const windows = openings(classMask, w, h, 3)
+    .filter((o) => o.width >= minOpen * 0.6)
+    .map((o) => ({ center: o.center, width: o.width }))
 
   return {
     planType: 'floor_residential',
@@ -194,7 +201,27 @@ function openings(classMask, w, h, cls, minPx = 4) {
     out.push({
       center: { x: s.sx / s.n, y: s.sy / s.n },
       width: Math.max(s.x1 - s.x0 + 1, s.y1 - s.y0 + 1),
+      bbox: { x0: s.x0, x1: s.x1, y0: s.y0, y1: s.y1 },
+      n: s.n,
     })
   }
   return out
+}
+
+// Does the pad-expanded bbox of this component contain at least `frac` of the
+// component's own pixel count in class `cls`? Used to detect fragments that
+// hug a different-class region (e.g. door specks fringing a window).
+function touchesClass(classMask, w, h, comp, cls, frac, pad = 3) {
+  const x0 = Math.max(0, comp.bbox.x0 - pad)
+  const x1 = Math.min(w - 1, comp.bbox.x1 + pad)
+  const y0 = Math.max(0, comp.bbox.y0 - pad)
+  const y1 = Math.min(h - 1, comp.bbox.y1 + pad)
+  let hits = 0
+  const need = Math.max(4, comp.n * frac)
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      if (classMask[y * w + x] === cls && ++hits >= need) return true
+    }
+  }
+  return false
 }

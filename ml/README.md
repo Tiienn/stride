@@ -152,7 +152,16 @@ effort:
       magics so a failure actually stops the run, plus an explicit image-
       count assert. Also dropped `Bitstream Charter` from the font list (no
       TTF/OTF on this system, only legacy Type1 — resvg can't parse it).
-- [ ] Retrain on v2 data (Colab, same notebook) → model-v2 release
+- [x] Retrained on v2 data (Colab T4, 10k samples, 30 epochs) → `model-v2`
+      release, now what scripts/fetch-model.mjs pulls. Head-to-head on the
+      hard held-out style (open-plan/balcony/bold furniture, unseen seed):
+      door IoU v1 0.690 → v2 0.923 (wall 0.955→0.968, window 0.947→0.953),
+      with no regression on the old style (v2 matches v1 within noise).
+      Also added a glazing-edge filter to both vectorizers: v2 learned from
+      sliding doors to fringe window ends with small door-class patches, so
+      door components whose surroundings are substantially window-class get
+      dropped (30 spurious doors → 7 real ones on the OOD apartment test,
+      and the door-width scale fallback recovered from 2× off to ~15% off).
 - [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
       keystone warp) / real-data flywheel
