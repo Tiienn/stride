@@ -90,6 +90,7 @@ function buildInterior(analysis, ppm) {
   walls = mergeDuplicateWalls(walls, 0.25)
   walls = mergeCollinearOverlaps(walls)
   walls = snapTJunctions(walls, 0.35)
+  walls = sealCollinearGaps(walls)
   walls = pruneOrphanWalls(walls)
 
   for (const d of analysis.doors || []) {
@@ -372,6 +373,70 @@ function snapTJunctions(walls, radius) {
   return walls
 }
 
+// Bridge modest gaps between dangling wall endpoints. The model traces
+// exterior walls but leaves door/window/balcony openings as bare gaps (it
+// never saw wall there) — and unlike an interior doorway (where the full wall
+// is still rasterized, keeping rooms apart), an unsealed gap in the outer
+// envelope lets the room flood-fill leak "outside" and swallow the whole
+// interior. Any two free endpoints (from different walls) within a modest
+// distance are almost always one wall broken by an opening; connect them.
+// Orientation-agnostic, so it also seals angled bay/balcony walls. Wide gaps
+// (open-plan sides, real archways) exceed maxGap and are left open.
+function sealCollinearGaps(walls, maxGap = 2.4) {
+  const isFree = (p, self) =>
+    !walls.some((o) => o !== self && projectOnSegment(p, o.start, o.end).d < o.thickness / 2 + 0.18)
+  // collect every dangling endpoint, tagged with its wall's outward direction
+  // (the unit vector pointing from the wall INTO the gap, i.e. away from the
+  // wall's far end)
+  const ends = []
+  walls.forEach((w, i) => {
+    const len = dist2d(w.start, w.end) || 1
+    for (const key of ['start', 'end']) {
+      if (!isFree(w[key], w)) continue
+      const far = key === 'start' ? w.end : w.start
+      ends.push({ wi: i, p: w[key], w, dir: { x: (w[key].x - far.x) / len, z: (w[key].z - far.z) / len } })
+    }
+  })
+  // candidate bridges: two free endpoints of different walls, close enough,
+  // where the gap continues at least one wall's own line — the bridge is
+  // nearly parallel to that wall AND points outward from it (so we extend a
+  // broken wall along itself, never join a corner to an unrelated stub).
+  const cand = []
+  for (let a = 0; a < ends.length; a++) {
+    for (let b = a + 1; b < ends.length; b++) {
+      if (ends[a].wi === ends[b].wi) continue
+      const gap = dist2d(ends[a].p, ends[b].p)
+      if (gap < 0.05 || gap > maxGap) continue
+      const ux = (ends[b].p.x - ends[a].p.x) / gap
+      const uz = (ends[b].p.z - ends[a].p.z) / gap
+      // a→b should run outward along a's line, or b→a along b's line
+      const alignA = ends[a].dir.x * ux + ends[a].dir.z * uz
+      const alignB = ends[b].dir.x * -ux + ends[b].dir.z * -uz
+      if (Math.max(alignA, alignB) < 0.94) continue // ~20° tolerance
+      cand.push({ a, b, gap })
+    }
+  }
+  cand.sort((x, y) => x.gap - y.gap)
+  const usedEnd = new Set()
+  const added = []
+  for (const { a, b } of cand) {
+    if (usedEnd.has(a) || usedEnd.has(b)) continue
+    usedEnd.add(a)
+    usedEnd.add(b)
+    added.push({
+      id: uid('wall'),
+      start: { ...ends[a].p },
+      end: { ...ends[b].p },
+      height: WALL_HEIGHT,
+      thickness: Math.max(ends[a].w.thickness, ends[b].w.thickness),
+      isExterior: ends[a].w.isExterior || ends[b].w.isExterior,
+      openings: [],
+      sealed: true,
+    })
+  }
+  return walls.concat(added)
+}
+
 // Furniture outlines, dimension lines and railings misread as walls show up
 // as short segments floating in space. Real walls connect: prune segments
 // with free ends, iterating because removing one orphan can orphan another.
@@ -475,24 +540,43 @@ export function finalizeInteriorPlan(partial) {
   const bounds = wallBounds(walls)
   const grid = buildGrid(walls, bounds)
 
-  // Flood outside from the border
-  floodFrom(grid, 0, 0, -2, (v) => v === -3)
-  for (let x = 0; x < grid.w; x++) {
-    floodFrom(grid, x, 0, -2, (v) => v === -3)
-    floodFrom(grid, x, grid.h - 1, -2, (v) => v === -3)
-  }
-  for (let y = 0; y < grid.h; y++) {
-    floodFrom(grid, 0, y, -2, (v) => v === -3)
-    floodFrom(grid, grid.w - 1, y, -2, (v) => v === -3)
-  }
-
-  // Flood each declared room from its center
+  // Multi-source flood: room seeds (label i) and the outside (label -2)
+  // compete for the interior in one breadth-first pass. Whichever source
+  // reaches a cell first (by wall-free path distance) claims it. This is the
+  // load-bearing robustness trick: if the model leaves a gap in the exterior
+  // envelope (an undetected wall at a door, window or balcony opening), the
+  // outside can only creep in as far as the nearest room seed — it wins the
+  // cells around the leak, not the entire interior. A single missing wall
+  // therefore shaves a room instead of turning the whole plan into void.
   const rooms = [...(partial.rooms || [])]
+  const queue = []
+  let head = 0
   rooms.forEach((room, i) => {
     const c = worldToCell(grid, room.center.x, room.center.z)
-    const seed = findNearest(grid, c.cx, c.cy, (v) => v === -3, 8)
-    if (seed) floodFrom(grid, seed.x, seed.y, i, (v) => v === -3)
+    const seed = findNearest(grid, c.cx, c.cy, (v) => v === -3, 12)
+    if (seed) {
+      grid.cells[seed.y * grid.w + seed.x] = i
+      queue.push(seed.y * grid.w + seed.x)
+    }
   })
+  const pushOutside = (x, y) => {
+    if (x < 0 || y < 0 || x >= grid.w || y >= grid.h) return
+    const idx = y * grid.w + x
+    if (grid.cells[idx] === -3) { grid.cells[idx] = -2; queue.push(idx) }
+  }
+  for (let x = 0; x < grid.w; x++) { pushOutside(x, 0); pushOutside(x, grid.h - 1) }
+  for (let y = 0; y < grid.h; y++) { pushOutside(0, y); pushOutside(grid.w - 1, y) }
+  while (head < queue.length) {
+    const idx = queue[head++]
+    const label = grid.cells[idx]
+    const x = idx % grid.w, y = (idx / grid.w) | 0
+    const spread = (nx, ny) => {
+      if (nx < 0 || ny < 0 || nx >= grid.w || ny >= grid.h) return
+      const nidx = ny * grid.w + nx
+      if (grid.cells[nidx] === -3) { grid.cells[nidx] = label; queue.push(nidx) }
+    }
+    spread(x - 1, y); spread(x + 1, y); spread(x, y - 1); spread(x, y + 1)
+  }
 
   // Any remaining enclosed cells are rooms the analyzer missed → synthesize
   for (let y = 1; y < grid.h - 1; y++) {
