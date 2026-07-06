@@ -214,6 +214,7 @@ export async function analyzePlanImage(body, opts = {}) {
   const response = await client.messages.create({
     model: model || DEFAULT_MODEL,
     max_tokens: 16000,
+    temperature: 0, // extraction, not creativity — same plan must give the same walls
     system: SYSTEM_PROMPT,
     tools: [ANALYSIS_TOOL],
     tool_choice: { type: 'tool', name: 'record_plan_analysis' },
@@ -266,6 +267,7 @@ async function refinePlanAnalysis(body, { apiKey, model }) {
   const response = await client.messages.create({
     model: model || DEFAULT_MODEL,
     max_tokens: 8000,
+    temperature: 0,
     system: REFINE_SYSTEM_PROMPT,
     tools: [CORRECTIONS_TOOL],
     tool_choice: { type: 'tool', name: 'record_plan_corrections' },

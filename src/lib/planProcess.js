@@ -132,10 +132,33 @@ function buildInterior(analysis, ppm) {
   })
 }
 
+// Median px/m over every printed dimension whose endpoints were located.
+// CAD drawings carry dozens of dimension chains; the median across them is
+// far more robust than any single reading (or than the analyzer's one-shot
+// scale guess, which has to trust its own arithmetic).
+function dimensionsMedianPpm(analysis) {
+  const vals = []
+  for (const d of analysis.dimensions || []) {
+    if (!(d?.value > 0) || !d.startPixel || !d.endPixel) continue
+    const px = Math.hypot(d.endPixel.x - d.startPixel.x, d.endPixel.y - d.startPixel.y)
+    const meters = d.unit === 'mm' ? d.value / 1000 : d.unit === 'cm' ? d.value / 100 : d.unit === 'ft' ? d.value * 0.3048 : d.value
+    // small dims have proportionally sloppy pixel endpoints — skip them
+    if (px > 40 && meters >= 1.0) vals.push(px / meters)
+  }
+  vals.sort((a, b) => a - b)
+  return vals.length >= 2 ? vals[Math.floor(vals.length / 2)] : null
+}
+
 function resolveScale(analysis) {
   const s = analysis.scale
-  if (s?.pixelsPerMeter > 1 && (s.confidence ?? 0) >= 0.5) return s.pixelsPerMeter
-  // Fallback 1: derive from a labeled dimension
+  const dimsPpm = dimensionsMedianPpm(analysis)
+  if (s?.pixelsPerMeter > 1 && (s.confidence ?? 0) >= 0.5) {
+    // trust the declared scale unless the measured dimensions disagree hard
+    if (dimsPpm && Math.abs(dimsPpm / s.pixelsPerMeter - 1) > 0.3) return dimsPpm
+    return s.pixelsPerMeter
+  }
+  if (dimsPpm) return dimsPpm
+  // Fallback 1: derive from a single labeled dimension
   for (const d of analysis.dimensions || []) {
     if (d?.value > 0 && d.startPixel && d.endPixel) {
       const px = Math.hypot(d.endPixel.x - d.startPixel.x, d.endPixel.y - d.startPixel.y)
@@ -901,7 +924,7 @@ function repairRoomAccess(walls, rooms, grid) {
       const room = pending[i]
       const best = findPunchSite(walls, room.gridIndex, reachable, sideRegions)
       if (!best) continue
-      const width = Math.max(0.95, 2 * (PLAYER_RADIUS + best.wall.thickness / 2) + 0.16)
+      const width = Math.max(0.85, 2 * (PLAYER_RADIUS + best.wall.thickness / 2) + 0.16)
       const len = dist2d(best.wall.start, best.wall.end)
       const half = width / 2 + 0.05
       const position = clamp(best.along, half, Math.max(half, len - half))
@@ -1057,12 +1080,12 @@ function findPunchSite(walls, region, reachable, sideRegions) {
   let best = null
   for (const wall of walls) {
     const len = dist2d(wall.start, wall.end)
-    if (len < 1.0) continue
+    if (len < 0.9) continue // small rooms (staircases, WCs) have short walls
     let run = null
     const closeRun = () => {
       if (!run) return
       const length = run.end - run.start
-      if (length >= 0.9) {
+      if (length >= 0.75) {
         const interior = run.other >= 0
         const score = length + (interior ? 100 : 0)
         if (!best || score > best.score) {
