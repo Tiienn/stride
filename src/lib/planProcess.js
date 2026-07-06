@@ -521,9 +521,17 @@ function enforcePassableOpenings(walls) {
       if (o.type === 'window') continue
       const passable = 2 * (PLAYER_RADIUS + w.thickness / 2) + 0.16
       const byType = o.type === 'door' ? 0.8 : 0.95
-      o.width = Math.min(Math.max(o.width, byType, passable), Math.max(0.62, len - 0.2))
-      const half = o.width / 2 + 0.05
-      o.position = clamp(o.position, half, Math.max(half, len - half))
+      const need = Math.max(byType, passable)
+      if (need > len - 0.2) {
+        // short wall: a capped door would be pinched shut by its own jambs —
+        // give the opening the whole wall instead (a full-width pass-through)
+        o.width = len + 0.02
+        o.position = len / 2
+      } else {
+        o.width = Math.min(Math.max(o.width, need), len - 0.2)
+        const half = o.width / 2 + 0.05
+        o.position = clamp(o.position, half, Math.max(half, len - half))
+      }
     }
   }
 }
@@ -888,41 +896,25 @@ function repairRoomAccess(walls, rooms, grid) {
     return result
   }
 
-  // Connectivity graph from existing door/doorway openings
-  const adj = new Map()
-  const link = (a, b) => {
-    if (!adj.has(a)) adj.set(a, new Set())
-    if (!adj.has(b)) adj.set(b, new Set())
-    adj.get(a).add(b)
-    adj.get(b).add(a)
-  }
-  for (const w of walls) {
-    for (const o of w.openings) {
-      if (o.type === 'window') continue
-      const [a, b] = sideRegions(w, o.position)
-      if (a !== -1 && b !== -1 && a !== b) link(a, b)
-    }
-  }
-
+  // Physical reachability, not graph trust: a detected door attached to the
+  // wrong wall makes the opening-graph claim a room is connected when the
+  // player capsule can never actually get in. Simulate the capsule on the
+  // grid against the real collision segments; punch doorways for whatever is
+  // genuinely unreachable; re-simulate (punching changes the segments) until
+  // everything is walkable or nothing more can be done.
   const spawnRoom = rooms.reduce((p, r) => (r.area > p.area ? r : p))
-  const reachable = new Set([spawnRoom.gridIndex])
-  const queue = [spawnRoom.gridIndex]
-  while (queue.length) {
-    for (const n of adj.get(queue.pop()) || []) {
-      if (!reachable.has(n)) { reachable.add(n); queue.push(n) }
+  for (let round = 0; round < 5; round++) {
+    const reached = capsuleReachable(walls, grid, spawnRoom.center)
+    if (!reached) return
+    const touched = new Set([spawnRoom.gridIndex])
+    for (let i = 0; i < grid.cells.length; i++) {
+      if (reached[i] && grid.cells[i] >= 0) touched.add(grid.cells[i])
     }
-  }
-
-  const pending = rooms
-    .filter((r) => !reachable.has(r.gridIndex))
-    .sort((a, b) => b.area - a.area)
-
-  let progress = true
-  while (progress && pending.length) {
-    progress = false
-    for (let i = 0; i < pending.length; i++) {
-      const room = pending[i]
-      const best = findPunchSite(walls, room.gridIndex, reachable, sideRegions)
+    const pending = rooms.filter((r) => !touched.has(r.gridIndex)).sort((a, b) => b.area - a.area)
+    if (!pending.length) return
+    let progress = false
+    for (const room of pending) {
+      const best = findPunchSite(walls, room.gridIndex, touched, sideRegions)
       if (!best) continue
       const width = Math.max(0.85, 2 * (PLAYER_RADIUS + best.wall.thickness / 2) + 0.16)
       const len = dist2d(best.wall.start, best.wall.end)
@@ -931,30 +923,85 @@ function repairRoomAccess(walls, rooms, grid) {
       const clash = best.wall.openings.some(
         (o) => Math.abs(o.position - position) < (o.width + width) / 2 + 0.1
       )
-      if (!clash) {
-        best.wall.openings.push({
-          id: uid('open'),
-          type: 'doorway',
-          width,
-          height: 2.05,
-          sillHeight: 0,
-          position,
-          inferred: true,
-        })
-      }
-      reachable.add(room.gridIndex)
-      // rooms that were only reachable through this one may now connect
-      const q2 = [room.gridIndex]
-      while (q2.length) {
-        for (const n of adj.get(q2.pop()) || []) {
-          if (!reachable.has(n)) { reachable.add(n); q2.push(n) }
+      if (clash) continue
+      best.wall.openings.push({
+        id: uid('open'),
+        type: 'doorway',
+        width,
+        height: 2.05,
+        sillHeight: 0,
+        position,
+        inferred: true,
+      })
+      progress = true
+    }
+    if (!progress) return
+  }
+}
+
+// Cells the player capsule can reach from `start`: passable = no collision
+// segment (walls minus door gaps) within PLAYER_RADIUS. Built segment-first
+// (mark blocked cells inside each segment's inflated bbox) so cost scales
+// with wall length, not cells x segments.
+function capsuleReachable(walls, grid, start) {
+  const segs = collisionSegments({ walls })
+  const blocked = new Uint8Array(grid.w * grid.h)
+  for (const s of segs) {
+    // slightly under the true capsule radius: the in-game physics is
+    // continuous, so a corridor a hair wider than the capsule IS walkable
+    // even when no 10cm cell center happens to fall inside it
+    const r = Math.max(0.05, PLAYER_RADIUS + s.r - grid.cell * 0.45)
+    const minX = Math.min(s.ax, s.bx) - r
+    const maxX = Math.max(s.ax, s.bx) + r
+    const minZ = Math.min(s.az, s.bz) - r
+    const maxZ = Math.max(s.az, s.bz) + r
+    const c0 = worldToCell(grid, minX, minZ)
+    const c1 = worldToCell(grid, maxX, maxZ)
+    for (let cy = Math.max(0, c0.cy); cy <= Math.min(grid.h - 1, c1.cy); cy++) {
+      for (let cx = Math.max(0, c0.cx); cx <= Math.min(grid.w - 1, c1.cx); cx++) {
+        if (blocked[cy * grid.w + cx]) continue
+        const wx = grid.originX + (cx + 0.5) * grid.cell
+        const wz = grid.originZ + (cy + 0.5) * grid.cell
+        const abx = s.bx - s.ax
+        const abz = s.bz - s.az
+        const lenSq = abx * abx + abz * abz || 1e-9
+        const t = clamp(((wx - s.ax) * abx + (wz - s.az) * abz) / lenSq, 0, 1)
+        if (Math.hypot(wx - (s.ax + abx * t), wz - (s.az + abz * t)) < r) {
+          blocked[cy * grid.w + cx] = 1
         }
       }
-      pending.splice(i, 1)
-      progress = true
-      break
     }
   }
+  const c = worldToCell(grid, start.x, start.z)
+  let seed = -1
+  outer: for (let radius = 0; radius <= 10; radius++) {
+    for (let oy = -radius; oy <= radius; oy++) {
+      for (let ox = -radius; ox <= radius; ox++) {
+        if (Math.max(Math.abs(ox), Math.abs(oy)) !== radius) continue
+        const x = c.cx + ox
+        const y = c.cy + oy
+        if (x < 0 || y < 0 || x >= grid.w || y >= grid.h) continue
+        if (!blocked[y * grid.w + x]) { seed = y * grid.w + x; break outer }
+      }
+    }
+  }
+  if (seed < 0) return null
+  const reached = new Uint8Array(grid.w * grid.h)
+  const stack = [seed]
+  reached[seed] = 1
+  while (stack.length) {
+    const idx = stack.pop()
+    const x = idx % grid.w
+    const y = (idx / grid.w) | 0
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx
+      const ny = y + dy
+      if (nx < 0 || ny < 0 || nx >= grid.w || ny >= grid.h) continue
+      const nidx = ny * grid.w + nx
+      if (!blocked[nidx] && !reached[nidx]) { reached[nidx] = 1; stack.push(nidx) }
+    }
+  }
+  return reached
 }
 
 // ---------------------------------------------------------------------------
