@@ -159,26 +159,40 @@ function geometryQualityOf(analysis) {
   }
 }
 
-// Three candidate worlds, best one wins: the model's geometry alone, the
-// model's geometry + Claude's walls unioned in (recovers model-missed walls,
-// but can also import a Claude hallucination like a balcony railing read as
-// walls), and Claude's geometry alone. Ties break toward the earlier
-// candidate — model precision first.
-function pickGeometry(local, claude) {
+// Candidate worlds, best one wins: the model's geometry alone, the model's
+// geometry + Claude's walls unioned in (recovers model-missed walls, but can
+// also import a Claude hallucination like a balcony railing read as walls),
+// Claude's walls filtered by the model's background veto, and Claude's raw
+// geometry. Model-family candidates are pixel-precise and symbol-aware where
+// Claude's tracing drifts and varies run to run, so a Claude candidate must
+// BEAT the best model-family score by a clear margin (not just edge it out)
+// before it ships — close calls go to the model.
+const CLAUDE_MARGIN = 1.12
+export function pickGeometry(local, claude) {
   const hybridBase = { ...claude, doors: local.doors, windows: local.windows, imageSize: local.imageSize }
+  const cm = local.classMap
+  const vetoedClaudeWalls = cm
+    ? (claude.walls || []).filter((w) => !(w?.start && w?.end && modelSawNothing(w, cm)))
+    : null
+  // trust: model-family (0) > claude-vetoed (1) > raw claude (2). A less
+  // trusted candidate must clear the margin, not just edge ahead — phantom
+  // walls (a hallucinated closet) INCREASE raw enclosure, so the score alone
+  // systematically flatters raw claude.
   const candidates = [
-    { label: 'model+union', analysis: { ...hybridBase, walls: unionWalls(local.walls, claude.walls, local.classMap) } },
-    { label: 'model', analysis: { ...hybridBase, walls: local.walls } },
-    { label: 'claude', analysis: claude },
+    { label: 'model+union', trust: 0, claudeFamily: false, analysis: { ...hybridBase, walls: unionWalls(local.walls, claude.walls, cm) } },
+    { label: 'model', trust: 0, claudeFamily: false, analysis: { ...hybridBase, walls: local.walls } },
+    ...(vetoedClaudeWalls ? [{ label: 'claude-vetoed', trust: 1, claudeFamily: true, analysis: { ...claude, walls: vetoedClaudeWalls } }] : []),
+    { label: 'claude', trust: 2, claudeFamily: true, analysis: claude },
   ]
+  for (const c of candidates) c.q = geometryQualityOf(c.analysis)
   let best = null
   for (const c of candidates) {
-    c.q = geometryQualityOf(c.analysis)
-    if (!best || c.q > best.q) best = c
+    if (!best) { best = c; continue }
+    const need = c.trust > best.trust ? best.q * CLAUDE_MARGIN : best.q
+    if (c.q > need) best = c
   }
-  if (import.meta.env.DEV) {
-    console.info('[stride] geometry quality — ' + candidates.map((c) => `${c.label}: ${c.q.toFixed(3)}`).join(', '))
-  }
+  console.info('[stride] geometry — picked ' + best.label + ' (' +
+    candidates.map((c) => `${c.label}: ${c.q.toFixed(3)}`).join(', ') + ')')
   return best
 }
 
@@ -271,5 +285,11 @@ export async function analyzeUpload(file, onStatus, signal) {
       'No usable walls or rooms were detected. Try a clearer plan image — dark wall lines on a light background work best.'
     )
   }
+  // which reading built this world — shown in the expanded map, and the
+  // first thing to check when a user reports a bad conversion
+  plan.geometrySource = claude && claude.planType === 'site' ? 'claude (site)'
+    : picked && picked.label !== 'claude' ? picked.label
+    : claude ? 'claude+refine'
+    : 'model (no key)'
   return { plan, preview: prepped.dataUrl }
 }

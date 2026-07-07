@@ -297,7 +297,7 @@ export default function Minimap() {
               style={{ width: bigSize, height: bigSize }}
             />
             <button className="minimap-close" onClick={close} aria-label="Close map">×</button>
-            <div className="minimap-overlay-hint">{plan.name} · {isTouchDevice() ? 'tap outside to close' : 'M or Esc to close'}</div>
+            <div className="minimap-overlay-hint">{plan.name}{plan.geometrySource ? ` · read: ${plan.geometrySource}` : ''} · {isTouchDevice() ? 'tap outside to close' : 'M or Esc to close'}</div>
           </div>
         </div>
       )}
