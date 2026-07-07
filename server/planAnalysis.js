@@ -144,6 +144,8 @@ F. Openings sit INSIDE walls: a door's center must lie on a wall segment you tra
 
 DO NOT trace as walls: furniture, kitchen counters, wardrobes, stairs, dimension lines, extension lines, hatching, text, door leaves or their swing arcs. If a "wall" is thinner than every other line and touches nothing, it is probably a dimension line.
 
+A rectangle with an X or diagonal cross drawn through it is a FURNITURE OR FIXTURE SYMBOL — a wardrobe, cabinet, appliance or service shaft — never a room. Do not trace any of its four sides as walls, even when it sits flush against real walls; its outline is cabinetry, not structure. The same goes for a staircase bounded by thin railing lines inside a larger room: the railing is not a wall.
+
 Record your analysis with the record_plan_analysis tool. Be exhaustive with walls — a missed wall ruins the 3D model.`
 
 // Second pass: the model reviews its own extraction against the image and
@@ -185,7 +187,7 @@ const CORRECTIONS_TOOL = {
 const REFINE_SYSTEM_PROMPT = `You are re-checking a structured extraction of an architectural plan against the original image. The extraction will drive a walkable 3D model, so errors have physical consequences: a missed wall is a hole, an invented wall blocks a corridor, a missed door seals a room.
 
 Check, in order:
-1. FALSE WALLS: walls in the extraction that are actually furniture, counters, stairs, dimension lines, text, door swing arcs — or a second trace of a wall already listed (two parallel segments ~one wall-thickness apart along the same span are one double-traced wall: keep one index, report the other as false).
+1. FALSE WALLS: walls in the extraction that are actually furniture, counters, stairs, dimension lines, text, door swing arcs — or a second trace of a wall already listed (two parallel segments ~one wall-thickness apart along the same span are one double-traced wall: keep one index, report the other as false). Pay special attention to rectangles with an X/diagonal cross through them: those are wardrobe/cabinet/shaft symbols, and any extracted wall lying on one of their sides is false.
 2. MISSED WALLS: real walls absent from the extraction. Compare room by room — every room on the drawing must be fully enclosed by extracted walls (with doors as the only gaps).
 3. DOORS: every room must be reachable — each room needs at least one door/doorway in the extraction. Find the openings for any sealed room. Also drop doors that don't exist.
 4. ROOMS: any labeled or clearly-drawn room missing from the extraction's room list.

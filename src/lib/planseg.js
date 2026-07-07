@@ -110,6 +110,12 @@ export async function segmentPlanImage(dataUrl, srcW, srcH) {
     }
     analysis.imageSize = { width: srcW, height: srcH }
     analysis.inferenceMs = Math.round(performance.now() - t0)
+    // Raw per-pixel classes (inference space) + the mapping into the
+    // original pixel space. The merge step uses this to VETO Claude walls
+    // the model confidently classified as background — the net is trained
+    // to see through furniture symbols (X-box wardrobes, stair railings)
+    // that Claude still traces as walls.
+    analysis.classMap = { data: classes, w, h, scaleX, scaleY }
     return analysis
   } catch (err) {
     console.warn('local plan segmentation unavailable:', err?.message || err)

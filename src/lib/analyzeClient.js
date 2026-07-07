@@ -103,7 +103,37 @@ function pointSegDist(p, a, b) {
   return Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t))
 }
 
-export function unionWalls(modelWalls, claudeWalls) {
+// The model is trained to see THROUGH furniture symbols — X-box wardrobes,
+// stair railings, dimension lines — that Claude still traces as walls. When
+// the model's segmentation confidently classified an entire line as
+// background, a Claude wall there is almost always a misread symbol; a
+// genuinely missed wall leaves at least fragments of wall/door/window class
+// along its path. Lenient threshold so real recoveries survive.
+function modelSawNothing(cw, cm) {
+  const len = Math.hypot(cw.end.x - cw.start.x, cw.end.y - cw.start.y)
+  const steps = Math.max(6, Math.round(len / 12))
+  let sampled = 0
+  let structural = 0
+  for (let i = 0; i <= steps; i++) {
+    // interior only: a Claude wall's ENDPOINTS land on corners/T-junctions
+    // of real walls by construction, so they always read as structure
+    const t = 0.12 + 0.76 * (i / steps)
+    const ix = Math.round((cw.start.x + (cw.end.x - cw.start.x) * t) / cm.scaleX)
+    const iy = Math.round((cw.start.y + (cw.end.y - cw.start.y) * t) / cm.scaleY)
+    if (ix < 2 || iy < 2 || ix >= cm.w - 2 || iy >= cm.h - 2) continue
+    sampled++
+    let hit = false
+    for (let oy = -2; oy <= 2 && !hit; oy++) {
+      for (let ox = -2; ox <= 2; ox++) {
+        if (cm.data[(iy + oy) * cm.w + ix + ox] !== 0) { hit = true; break }
+      }
+    }
+    if (hit) structural++
+  }
+  return sampled >= 4 && structural / sampled < 0.15
+}
+
+export function unionWalls(modelWalls, claudeWalls, classMap) {
   const out = [...modelWalls]
   for (const cw of claudeWalls || []) {
     if (!cw?.start || !cw?.end) continue
@@ -113,7 +143,10 @@ export function unionWalls(modelWalls, claudeWalls) {
       const p = { x: cw.start.x + (cw.end.x - cw.start.x) * t, y: cw.start.y + (cw.end.y - cw.start.y) * t }
       if (modelWalls.some((mw) => pointSegDist(p, mw.start, mw.end) < tol)) covered++
     }
-    if (covered <= 1) out.push({ ...cw, fromClaude: true })
+    if (covered <= 1) {
+      if (classMap && modelSawNothing(cw, classMap)) continue
+      out.push({ ...cw, fromClaude: true })
+    }
   }
   return out
 }
@@ -134,7 +167,7 @@ function geometryQualityOf(analysis) {
 function pickGeometry(local, claude) {
   const hybridBase = { ...claude, doors: local.doors, windows: local.windows, imageSize: local.imageSize }
   const candidates = [
-    { label: 'model+union', analysis: { ...hybridBase, walls: unionWalls(local.walls, claude.walls) } },
+    { label: 'model+union', analysis: { ...hybridBase, walls: unionWalls(local.walls, claude.walls, local.classMap) } },
     { label: 'model', analysis: { ...hybridBase, walls: local.walls } },
     { label: 'claude', analysis: claude },
   ]
