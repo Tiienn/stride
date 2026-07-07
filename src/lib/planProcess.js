@@ -670,6 +670,29 @@ export function finalizeInteriorPlan(partial) {
       }
     }
   }
+  // Cavities too small to be real rooms are pipe shafts, chimneys and wall
+  // voids — solidify them instead of shipping a 0.9m² "bathroom" with a
+  // punched door. When a LABELED room's center landed inside one (plan text
+  // often sits right on the shaft symbol beside the real room), move that
+  // label to the nearest unlabeled cavity rather than dropping it.
+  const orphanedLabels = []
+  rooms.forEach((room, i) => {
+    const s = stats[i]
+    if (!s.count || s.count * CELL * CELL >= 1.2) return
+    replaceRegion(grid, i, -1)
+    if (!room.synthetic) orphanedLabels.push({ room, x: s.sx / s.count, z: s.sz / s.count })
+    s.count = 0
+  })
+  for (const orphan of orphanedLabels) {
+    let best = null
+    rooms.forEach((room, i) => {
+      if (!room.synthetic || !stats[i].count) return
+      const d = Math.hypot(stats[i].sx / stats[i].count - orphan.x, stats[i].sz / stats[i].count - orphan.z)
+      if (d < 3 && (!best || d < best.d)) best = { i, d }
+    })
+    if (best) rooms[best.i] = { ...rooms[best.i], name: orphan.room.name, type: orphan.room.type, synthetic: false }
+  }
+
   const finalRooms = []
   rooms.forEach((room, i) => {
     const s = stats[i]

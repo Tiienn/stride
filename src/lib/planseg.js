@@ -44,10 +44,15 @@ async function getSession() {
 }
 
 // dataUrl/canvas source → { data: Float32Array CHW, w, h, scale }
+// Inference size comes from the image's OWN pixels (never upscale line art —
+// bilinear blowups turn thin walls into gradients the net can't read);
+// srcW/srcH only define the coordinate space the results are mapped into.
 function preprocess(imageEl, srcW, srcH) {
-  const f = Math.min(1, MAX_INFER_DIM / Math.max(srcW, srcH))
-  const w = Math.round((srcW * f) / ALIGN) * ALIGN || ALIGN
-  const h = Math.round((srcH * f) / ALIGN) * ALIGN || ALIGN
+  const natW = imageEl.naturalWidth || srcW
+  const natH = imageEl.naturalHeight || srcH
+  const f = Math.min(1, MAX_INFER_DIM / Math.max(natW, natH))
+  const w = Math.round((natW * f) / ALIGN) * ALIGN || ALIGN
+  const h = Math.round((natH * f) / ALIGN) * ALIGN || ALIGN
   const canvas = document.createElement('canvas')
   canvas.width = w
   canvas.height = h

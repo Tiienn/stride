@@ -179,6 +179,12 @@ effort:
       broke the right wall at a T-junction corner, and sealCollinearGaps
       only bridged free-endpoint PAIRS. Added an anchored-endpoint pass
       (free end -> collinear wall's anchored endpoint, <=1m) to planProcess.
+- [ ] Generator v4 (from real-plan feedback on v3): crossed-rectangle
+      furniture symbols (wardrobes/cabinets drawn as an X-box read as walls
+      today -> phantom rooms carved out of bedrooms), plumbing/electrical
+      shaft symbols (small X-boxes in walls), stairs bounded by railing-thin
+      lines that must NOT read as walls (today a staircase becomes a fully
+      walled room even when it opens onto the living room).
 - [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
       keystone warp) / real-data flywheel

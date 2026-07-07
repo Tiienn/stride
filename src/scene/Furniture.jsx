@@ -97,6 +97,42 @@ function makePlacer(plan, room, info, rand) {
   const placed = []
   const items = []
 
+  // Walls near this room, for the geometric penetration test in fits().
+  // Grid sampling alone can miss a THIN wall passing between a big piece's
+  // sampled corners (same room on both sides — a peninsula stub, or a
+  // hairline CAD wall) and let a wardrobe straddle it, poking out the far
+  // side of the building.
+  const nearWalls = plan.walls.filter((w) => {
+    const minX = Math.min(w.start.x, w.end.x) - 1
+    const maxX = Math.max(w.start.x, w.end.x) + 1
+    const minZ = Math.min(w.start.z, w.end.z) - 1
+    const maxZ = Math.max(w.start.z, w.end.z) + 1
+    return minX < room.bbox.maxX && maxX > room.bbox.minX && minZ < room.bbox.maxZ && maxZ > room.bbox.minZ
+  })
+
+  // Deepest intrusion of any wall body (centerline ± half thickness) into the
+  // rect. ~0 for a piece sitting flush against a wall face; ≈ full thickness
+  // and beyond for a straddle.
+  function wallPenetration(aabb) {
+    let worst = 0
+    for (const w of nearWalls) {
+      const half = w.thickness / 2
+      const len = Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z)
+      const steps = Math.max(1, Math.ceil(len / 0.15))
+      for (let i = 0; i <= steps; i++) {
+        const px = w.start.x + (w.end.x - w.start.x) * (i / steps)
+        const pz = w.start.z + (w.end.z - w.start.z) * (i / steps)
+        const dx = Math.max(aabb.minX - px, 0, px - aabb.maxX)
+        const dz = Math.max(aabb.minZ - pz, 0, pz - aabb.maxZ)
+        const pen = dx === 0 && dz === 0
+          ? half + Math.min(px - aabb.minX, aabb.maxX - px, pz - aabb.minZ, aabb.maxZ - pz)
+          : half - Math.hypot(dx, dz)
+        if (pen > worst) worst = pen
+      }
+    }
+    return worst
+  }
+
   function fits(aabb, { height = 1, walkable = false, ignorePlaced = false } = {}) {
     // corners + center must sit in this room's cells
     const pts = [
@@ -105,6 +141,7 @@ function makePlacer(plan, room, info, rand) {
       [(aabb.minX + aabb.maxX) / 2, (aabb.minZ + aabb.maxZ) / 2],
     ]
     for (const [x, z] of pts) if (!cellIsRoom(plan, room, x, z)) return false
+    if (wallPenetration(aabb) > 0.05) return false
     if (!walkable) {
       // ignorePlaced: chairs tuck into desks/tables — furniture overlap is fine
       if (!ignorePlaced) for (const p of placed) if (aabbIntersects(aabb, p)) return false

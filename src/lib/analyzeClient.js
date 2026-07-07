@@ -35,7 +35,22 @@ export async function prepareImage(file) {
     dataUrl = canvas.toDataURL('image/jpeg', 0.92)
     mediaType = 'image/jpeg'
   }
-  return { base64: dataUrl.split(',')[1], mediaType, dataUrl, width: w, height: h }
+  // The upscale exists for Claude's vision (more visual tokens). It actively
+  // HURTS the segmentation net — a blurry 2x blowup reads far worse than the
+  // crisp original — so keep native pixels for the net when we upscaled.
+  // (Original is small by definition here, so the extra canvas is cheap.)
+  let nnDataUrl = dataUrl
+  if (scale > 1) {
+    const nc = document.createElement('canvas')
+    nc.width = bitmap.width
+    nc.height = bitmap.height
+    const nctx = nc.getContext('2d')
+    nctx.fillStyle = '#ffffff'
+    nctx.fillRect(0, 0, nc.width, nc.height)
+    nctx.drawImage(bitmap, 0, 0)
+    nnDataUrl = nc.toDataURL('image/png')
+  }
+  return { base64: dataUrl.split(',')[1], mediaType, dataUrl, nnDataUrl, width: w, height: h }
 }
 
 async function loadBitmap(file) {
@@ -142,7 +157,7 @@ export async function analyzeUpload(file, onStatus, signal) {
   // (walls/doors/windows — pixel-precise, instant, free); Claude owns
   // semantics (plan type, room names/types, scale from printed dimensions).
   onStatus?.('Reading the plan with Stride’s neural net…')
-  const localPromise = segmentPlanImage(prepped.dataUrl, prepped.width, prepped.height)
+  const localPromise = segmentPlanImage(prepped.nnDataUrl, prepped.width, prepped.height)
 
   let stage = 0
   onStatus?.(ANALYSIS_STAGES[0])
