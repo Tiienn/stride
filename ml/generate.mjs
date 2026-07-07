@@ -323,6 +323,14 @@ function sampleStyle() {
     plotBoundary: chance(0.35), // red dashed parcel boundary + survey markers + setbacks
     pool: chance(0.25), // dashed pool/deck rectangle outside the building
     stairs: chance(0.35), // stair treads + UP arrow in a small room
+    // v4 (from real-plan failures): crossed-rectangle symbols — wardrobes,
+    // cabinets, shafts. Architects draw them at wall-like line weights and
+    // the model read them as walls, carving phantom rooms out of bedrooms.
+    xboxes: chance(0.55),
+    xboxStroke: rand(1.0, 3.4), // up to genuinely wall-heavy
+    // v4: an OPEN staircase in a big room, bounded by railing-thin lines the
+    // model must not read as walls (real stairs got walled into sealed rooms)
+    openStairs: chance(0.4),
   }
 }
 
@@ -428,6 +436,75 @@ function renderSample(L, S) {
       }
       parts.push(`<text x="${f1(ax + 6)}" y="${f1(px(cand.y + cand.h / 2))}" font-family="${S.font}" font-size="9" font-weight="bold" fill="${pick(['#e08b2d', S.ink])}">UP</text>`)
       img.push(parts.join(''))
+    }
+  }
+  if (S.openStairs) {
+    // v4: stair run INSIDE the biggest room, hugging a wall, enclosed by a
+    // thin railing outline open at the foot — image only, never mask. Real
+    // architects bound open stairs with railing lines that look exactly like
+    // hairline walls; the model must learn to see through them.
+    const room = [...L.rooms].sort((a, b) => b.area - a.area)[0]
+    if (room && room.w > 3.2 && room.h > 3.2) {
+      const vertical = room.h >= room.w
+      const runL = Math.min(vertical ? room.h - 1.6 : room.w - 1.6, rand(2.4, 3.8))
+      const runW = rand(0.9, 1.2)
+      const left = chance(0.5)
+      // hug a side wall, start at the top/left end of the room
+      const sx = vertical ? (left ? room.x + 0.15 : room.x + room.w - 0.15 - runW) : room.x + 0.15
+      const sy = vertical ? room.y + 0.15 : (left ? room.y + 0.15 : room.y + room.h - 0.15 - runW)
+      const rw = vertical ? runW : runL
+      const rh = vertical ? runL : runW
+      const parts = []
+      const rail = `fill="none" stroke="${S.ink}" stroke-width="${f1(rand(1.0, 2.2))}"`
+      // railing: open at the foot of the run (one short side missing)
+      if (vertical) {
+        parts.push(`<path d="M${f1(px(sx))} ${f1(px(sy + rh))} L${f1(px(sx))} ${f1(px(sy))} L${f1(px(sx + rw))} ${f1(px(sy))} L${f1(px(sx + rw))} ${f1(px(sy + rh))}" ${rail}/>`)
+        if (chance(0.5)) parts.push(`<path d="M${f1(px(sx + 0.06))} ${f1(px(sy + rh))} L${f1(px(sx + 0.06))} ${f1(px(sy + 0.06))} L${f1(px(sx + rw - 0.06))} ${f1(px(sy + 0.06))} L${f1(px(sx + rw - 0.06))} ${f1(px(sy + rh))}" fill="none" stroke="${S.ink}" stroke-width="0.8"/>`)
+      } else {
+        parts.push(`<path d="M${f1(px(sx + rw))} ${f1(px(sy))} L${f1(px(sx))} ${f1(px(sy))} L${f1(px(sx))} ${f1(px(sy + rh))} L${f1(px(sx + rw))} ${f1(px(sy + rh))}" ${rail}/>`)
+      }
+      // treads
+      const n = Math.floor(runL / 0.27)
+      for (let i = 1; i < n; i++) {
+        const t = i * (runL / n)
+        if (vertical) parts.push(`<line x1="${f1(px(sx))}" y1="${f1(px(sy + t))}" x2="${f1(px(sx + rw))}" y2="${f1(px(sy + t))}" stroke="${S.ink}" stroke-width="${f1(Math.min(S.thinStroke, 1.6))}"/>`)
+        else parts.push(`<line x1="${f1(px(sx + t))}" y1="${f1(px(sy))}" x2="${f1(px(sx + t))}" y2="${f1(px(sy + rh))}" stroke="${S.ink}" stroke-width="${f1(Math.min(S.thinStroke, 1.6))}"/>`)
+      }
+      // break line (the zigzag "cut" convention) across the run, sometimes
+      if (chance(0.5)) {
+        const c = runL * rand(0.45, 0.65)
+        if (vertical) parts.push(`<path d="M${f1(px(sx - 0.08))} ${f1(px(sy + c + 0.14))} L${f1(px(sx + rw * 0.4))} ${f1(px(sy + c - 0.14))} L${f1(px(sx + rw * 0.6))} ${f1(px(sy + c + 0.14))} L${f1(px(sx + rw + 0.08))} ${f1(px(sy + c - 0.14))}" fill="none" stroke="${S.ink}" stroke-width="1"/>`)
+      }
+      // UP arrow along the run
+      const mx = px(sx + rw / 2)
+      if (vertical) {
+        parts.push(`<line x1="${f1(mx)}" y1="${f1(px(sy + rh - 0.25))}" x2="${f1(mx)}" y2="${f1(px(sy + 0.3))}" stroke="${S.ink}" stroke-width="1.1"/>` +
+          `<path d="M${f1(mx)} ${f1(px(sy + 0.3))} l-4 8 l8 0 Z" fill="${S.ink}"/>`)
+      }
+      parts.push(`<text x="${f1(mx + 5)}" y="${f1(px(sy + rh * 0.8))}" font-family="${S.font}" font-size="9" font-weight="bold" fill="${pick(['#e08b2d', S.ink])}">UP</text>`)
+      img.push(parts.join(''))
+    }
+  }
+  if (S.xboxes) {
+    // v4: crossed-rectangle symbols (wardrobe/cabinet/shaft) against walls in
+    // random rooms — image only. Drawn up to wall-heavy stroke weights: this
+    // is exactly the symbol that carved a phantom "Room 8" out of a real
+    // bedroom when the model read its outline as walls.
+    const count = randi(1, 3)
+    const rooms = [...L.rooms].sort(() => rng() - 0.5).slice(0, count)
+    for (const room of rooms) {
+      if (room.w < 1.6 || room.h < 1.6) continue
+      const along = chance(0.5) // long side along x
+      const bw = along ? Math.min(rand(0.9, 2.2), room.w - 0.8) : rand(0.5, 0.7)
+      const bh = along ? rand(0.5, 0.7) : Math.min(rand(0.9, 2.2), room.h - 0.8)
+      // snugged to a wall like real cabinetry
+      const bx = along ? room.x + rand(0.2, Math.max(0.21, room.w - bw - 0.2)) : (chance(0.5) ? room.x + 0.08 : room.x + room.w - bw - 0.08)
+      const by = along ? (chance(0.5) ? room.y + 0.08 : room.y + room.h - bh - 0.08) : room.y + rand(0.2, Math.max(0.21, room.h - bh - 0.2))
+      const X = px(bx), Y = px(by), W2 = bw * S.ppm, H2 = bh * S.ppm
+      const st = `fill="none" stroke="${pick([S.ink, '#333', '#444'])}" stroke-width="${f1(S.xboxStroke)}"`
+      img.push(`<rect x="${f1(X)}" y="${f1(Y)}" width="${f1(W2)}" height="${f1(H2)}" ${st}/>` +
+        `<line x1="${f1(X)}" y1="${f1(Y)}" x2="${f1(X + W2)}" y2="${f1(Y + H2)}" ${st}/>` +
+        `<line x1="${f1(X + W2)}" y1="${f1(Y)}" x2="${f1(X)}" y2="${f1(Y + H2)}" ${st}/>`)
     }
   }
 

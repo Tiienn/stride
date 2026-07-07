@@ -179,12 +179,18 @@ effort:
       broke the right wall at a T-junction corner, and sealCollinearGaps
       only bridged free-endpoint PAIRS. Added an anchored-endpoint pass
       (free end -> collinear wall's anchored endpoint, <=1m) to planProcess.
-- [ ] Generator v4 (from real-plan feedback on v3): crossed-rectangle
-      furniture symbols (wardrobes/cabinets drawn as an X-box read as walls
-      today -> phantom rooms carved out of bedrooms), plumbing/electrical
-      shaft symbols (small X-boxes in walls), stairs bounded by railing-thin
-      lines that must NOT read as walls (today a staircase becomes a fully
-      walled room even when it opens onto the living room).
+- [x] Generator v4 (from real-plan feedback on v3): crossed-rectangle
+      furniture/cabinet symbols snugged against walls at up-to-wall-heavy
+      stroke weights (an X-box wardrobe read as walls carved a phantom
+      "Room 8" out of a real bedroom), and OPEN staircases inside big rooms
+      bounded by railing-thin outlines + treads + break line + UP arrow
+      (real stairs got walled into sealed rooms). All image-only, masks
+      unchanged. The Colab notebook now mounts Drive BEFORE training and
+      checkpoints straight to MyDrive/stride-model/checkpoints/ — a mid-run
+      runtime reset no longer loses the weights (that failure cost a full
+      v3 run).
+- [ ] Retrain on v4 data -> model-v4 release -> flip MODEL_URL, benchmark
+      vs v3 on all real fixtures
 - [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
       keystone warp) / real-data flywheel
