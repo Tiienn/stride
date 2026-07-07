@@ -436,23 +436,47 @@ function sealCollinearGaps(walls, maxGap = 2.4) {
       const alignA = ends[a].dir.x * ux + ends[a].dir.z * uz
       const alignB = ends[b].dir.x * -ux + ends[b].dir.z * -uz
       if (Math.max(alignA, alignB) < 0.94) continue // ~20° tolerance
-      cand.push({ a, b, gap })
+      cand.push({ a, b, gap, q: ends[b].p, qw: ends[b].w })
+    }
+  }
+  // a wall fragment can also end near a CORNER — the far side of its gap is a
+  // T-junction where other walls already meet, so no free endpoint exists
+  // there and the pair pass above never sees it. Bridge a free endpoint to an
+  // anchored endpoint of a COLLINEAR wall (same line, bridge continues the
+  // broken wall outward). Tighter cap than the pair pass: a long bridge to an
+  // anchored corner is more likely a real open-plan edge than a broken wall.
+  const maxAnchoredGap = Math.min(maxGap, 1.0)
+  for (let a = 0; a < ends.length; a++) {
+    for (const other of walls) {
+      if (other === ends[a].w) continue
+      const olen = dist2d(other.start, other.end) || 1
+      const odir = { x: (other.end.x - other.start.x) / olen, z: (other.end.z - other.start.z) / olen }
+      for (const key of ['start', 'end']) {
+        const q = other[key]
+        const gap = dist2d(ends[a].p, q)
+        if (gap < 0.05 || gap > maxAnchoredGap) continue
+        const ux = (q.x - ends[a].p.x) / gap
+        const uz = (q.z - ends[a].p.z) / gap
+        if (ends[a].dir.x * ux + ends[a].dir.z * uz < 0.94) continue
+        if (Math.abs(odir.x * ux + odir.z * uz) < 0.94) continue // not collinear
+        cand.push({ a, b: -1, gap, q, qw: other })
+      }
     }
   }
   cand.sort((x, y) => x.gap - y.gap)
   const usedEnd = new Set()
   const added = []
-  for (const { a, b } of cand) {
-    if (usedEnd.has(a) || usedEnd.has(b)) continue
+  for (const { a, b, q, qw } of cand) {
+    if (usedEnd.has(a) || (b >= 0 && usedEnd.has(b))) continue
     usedEnd.add(a)
-    usedEnd.add(b)
+    if (b >= 0) usedEnd.add(b)
     added.push({
       id: uid('wall'),
       start: { ...ends[a].p },
-      end: { ...ends[b].p },
+      end: { ...q },
       height: WALL_HEIGHT,
-      thickness: Math.max(ends[a].w.thickness, ends[b].w.thickness),
-      isExterior: ends[a].w.isExterior || ends[b].w.isExterior,
+      thickness: Math.max(ends[a].w.thickness, qw.thickness),
+      isExterior: ends[a].w.isExterior || qw.isExterior,
       openings: [],
       sealed: true,
     })

@@ -169,8 +169,16 @@ effort:
       with mm labels and end ticks, stair treads + UP arrows, and a
       cadgray wall fill. All image-only distractors - masks unchanged.
       v2 measured on this style: door IoU 0.923 -> 0.877.
-- [ ] Retrain on v3 data (same Colab notebook) -> model-v3 release ->
-      update MODEL_URL in scripts/fetch-model.mjs
+- [x] Retrained on v3 data (Colab, 10k samples, 30 epochs) -> `model-v3`
+      release, now what scripts/fetch-model.mjs pulls. ONNX verified
+      bit-parity with best.pt (100% argmax agreement). Raw-model geometry
+      quality on the real fixtures: RoomSketcher apartment 0.819 -> 0.871,
+      Floor plan 71 0.544 -> 0.592, CAD drawing ~parity (0.560 -> 0.554)
+      but with the dimension-line phantom doors nearly gone (11 -> 6).
+      v3 initially scored 0.112 on Floor plan 71 - not a model problem: it
+      broke the right wall at a T-junction corner, and sealCollinearGaps
+      only bridged free-endpoint PAIRS. Added an anchored-endpoint pass
+      (free end -> collinear wall's anchored endpoint, <=1m) to planProcess.
 - [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
       keystone warp) / real-data flywheel
