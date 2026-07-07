@@ -12,6 +12,11 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body, #root { height: 100%; }
+@supports (height: 100dvh) {
+  /* mobile browser chrome collapses/expands — track the dynamic viewport */
+  html, body, #root { height: 100dvh; }
+}
+html, body { overscroll-behavior: none; }
 body {
   background: var(--bg);
   color: var(--ink);
@@ -208,7 +213,12 @@ code { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 0.92em
 .stage { position: fixed; inset: 0; }
 .stage canvas { display: block; }
 
-.hud { position: absolute; inset: 0; pointer-events: none; z-index: 10; }
+.hud {
+  position: absolute; inset: 0; pointer-events: none; z-index: 10;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.hud button, .hud select, .hud input, .minimap { touch-action: manipulation; }
 .tap-catcher { position: absolute; inset: 0; pointer-events: auto; cursor: pointer; z-index: 0; }
 .hud-card {
   pointer-events: auto;
@@ -221,7 +231,9 @@ code { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 0.92em
 
 .hud-top {
   position: absolute;
-  top: 18px; left: 18px; right: 18px;
+  top: max(18px, env(safe-area-inset-top));
+  left: max(18px, env(safe-area-inset-left));
+  right: max(18px, env(safe-area-inset-right));
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
@@ -337,7 +349,8 @@ select.chip option { background: var(--bg-raise); }
 
 .hud-bottom {
   position: absolute;
-  bottom: 22px; left: 50%;
+  bottom: max(22px, env(safe-area-inset-bottom));
+  left: 50%;
   transform: translateX(-50%);
 }
 .steps-pill {
@@ -363,8 +376,8 @@ select.chip option { background: var(--bg-raise); }
 
 .minimap {
   position: absolute;
-  right: 18px;
-  bottom: 18px;
+  right: max(18px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
   padding: 6px;
   line-height: 0;
   cursor: zoom-in;
@@ -431,8 +444,8 @@ select.chip option { background: var(--bg-raise); }
 
 .resume-bar {
   position: absolute;
-  bottom: 22px;
-  left: 22px;
+  bottom: max(22px, env(safe-area-inset-bottom));
+  left: max(22px, env(safe-area-inset-left));
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -610,4 +623,30 @@ select.chip option { background: var(--bg-raise); }
   .steps-pill { font-size: 12.5px; padding: 8px 14px; }
   .steps-pill .dot { margin: 0 6px; }
   .minimap { transform: scale(0.68); }
+}
+
+
+/* ---------- touch ergonomics ---------- */
+
+@media (pointer: coarse) {
+  .chip { padding: 10px 14px; font-size: 13.5px; }
+  .dz-btn { padding: 14px 30px; }
+  .sample-card { padding: 12px; }
+  .minimap-close { width: 42px; height: 42px; top: -16px; right: -16px; font-size: 22px; }
+  .tod input[type='range'] { width: 108px; height: 28px; }
+  .interact-hint { padding: 12px 20px; font-size: 15px; }
+  .resume-btn { padding: 13px 22px; }
+}
+
+/* phones: the top bar must not eat the world — compact single-row cards */
+@media (max-width: 560px) {
+  .hud-top { gap: 8px; }
+  .hud-place { padding: 8px 12px; }
+  .hud-plan { font-size: 12.5px; }
+  .hud-room { font-size: 11.5px; }
+  .hud-controls { padding: 6px 8px; gap: 6px; }
+  .tod input[type='range'] { width: 84px; }
+  .tod-time { display: none; }
+  .enter-overlay .legend { padding: 0 18px; }
+  .minimap-overlay-hint { font-size: 11px; bottom: -26px; }
 }

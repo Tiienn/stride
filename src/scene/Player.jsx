@@ -284,7 +284,9 @@ export default function Player({ plan }) {
       fwd += -touchInput.moveY
       strafe += touchInput.moveX
     }
-    const running = k.ShiftLeft || k.ShiftRight
+    // touch: pushing the stick to its rim breaks into a run
+    const running = k.ShiftLeft || k.ShiftRight ||
+      (touchInput.active && Math.hypot(touchInput.moveX, touchInput.moveY) > 0.95)
     const speed = running ? RUN : WALK
 
     const yaw = camera.rotation.y

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStride } from '../store.js'
 import { analyzeUpload } from '../lib/analyzeClient.js'
+import { isTouchDevice } from '../lib/touch.js'
 import { SAMPLES } from '../data/samples.js'
 import { audio } from '../lib/audio.js'
 
@@ -132,12 +133,14 @@ export default function Landing() {
               <path d="M28 6v8M20 30v12" opacity="0.5" />
             </svg>
           </div>
-          <div className="dz-title">Drop your plan here</div>
+          <div className="dz-title">{isTouchDevice() ? 'Add your plan' : 'Drop your plan here'}</div>
           <div className="dz-sub">
             Site, land, floor or office plan — image formats.
-            Stride detects what it is and builds the world.
+            {isTouchDevice()
+              ? ' Choose a photo or shoot the paper plan with your camera.'
+              : ' Stride detects what it is and builds the world.'}
           </div>
-          <button className="dz-btn" type="button">Choose a file</button>
+          <button className="dz-btn" type="button">{isTouchDevice() ? 'Choose or take a photo' : 'Choose a file'}</button>
           <div className="dz-more" onClick={(e) => {
             e.stopPropagation()
             samplesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })

@@ -6,6 +6,7 @@
 // large enough to read the whole plan, with room names and areas labeled.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useStride } from '../store.js'
+import { isTouchDevice } from '../lib/touch.js'
 
 const SIZE = 172 // css pixels (docked map)
 const PAD = 14
@@ -296,7 +297,7 @@ export default function Minimap() {
               style={{ width: bigSize, height: bigSize }}
             />
             <button className="minimap-close" onClick={close} aria-label="Close map">×</button>
-            <div className="minimap-overlay-hint">{plan.name} · M or Esc to close</div>
+            <div className="minimap-overlay-hint">{plan.name} · {isTouchDevice() ? 'tap outside to close' : 'M or Esc to close'}</div>
           </div>
         </div>
       )}
