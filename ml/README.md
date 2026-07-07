@@ -189,8 +189,18 @@ effort:
       checkpoints straight to MyDrive/stride-model/checkpoints/ — a mid-run
       runtime reset no longer loses the weights (that failure cost a full
       v3 run).
-- [ ] Retrain on v4 data -> model-v4 release -> flip MODEL_URL, benchmark
-      vs v3 on all real fixtures
+- [x] Retrained on v4 data -> `model-v4` release, now what
+      scripts/fetch-model.mjs pulls. ONNX verified bit-parity with best.pt
+      (100% argmax agreement; exported with dynamo=False - Colab's new
+      default exporter splits weights into a separate .onnx.data file the
+      browser loader can't use). Raw-model quality on the real fixtures:
+      plan 71 0.592 -> 0.646, CAD 0.554 -> 0.557, apartment 0.871 -> 0.860
+      (raw-mode scale drift merged two small rooms; Claude owns scale in
+      the live app). The targeted CAD phantoms are visibly fixed: the
+      dimension/curtain line mid-living-room no longer reads as a wall and
+      the stair-area enclosure is mostly gone. v4-style synthetic eval:
+      mIoU(no-bg) 0.941 (v3 scored 0.940 on the same set, but with the
+      localized phantom walls aggregate IoU under-weighs).
 - [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
       keystone warp) / real-data flywheel
