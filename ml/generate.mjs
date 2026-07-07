@@ -298,7 +298,7 @@ const FONTS = ['DejaVu Sans', 'FreeSans', 'DejaVu Serif', 'DejaVu Sans Mono']
 function sampleStyle() {
   return {
     ppm: rand(28, 60),
-    wallStyle: pick(['solid', 'solid', 'solid', 'double', 'gray', 'hatch']),
+    wallStyle: pick(['solid', 'solid', 'solid', 'double', 'gray', 'hatch', 'cadgray', 'cadgray']),
     ink: pick(['#000000', '#000000', '#1a1a1a', '#22262e', '#26303b']),
     background: pick(['#ffffff', '#ffffff', '#fdfcf8', 'grid', 'dots']),
     font: pick(FONTS),
@@ -316,6 +316,13 @@ function sampleStyle() {
     thinStroke: rand(0.8, 2.6), // real plan furniture is often drawn bold
     furnFill: chance(0.35) ? pick(['#ececec', '#f1efe9', '#e9edf1']) : 'none',
     caption: chance(0.4),
+    // CAD-drawing context — all pure distractors the model must NOT read as
+    // structure (motivated by a real architect's site+floor drawing):
+    dimChains: chance(0.5), // dimension chains INSIDE rooms, mm labels, ticks
+    dimColor: pick(['#e08b2d', '#e08b2d', '#cc5533', '#666666']),
+    plotBoundary: chance(0.35), // red dashed parcel boundary + survey markers + setbacks
+    pool: chance(0.25), // dashed pool/deck rectangle outside the building
+    stairs: chance(0.35), // stair treads + UP arrow in a small room
   }
 }
 
@@ -330,6 +337,9 @@ function renderSample(L, S) {
   let margin = S.dims ? rand(55, 95) : rand(20, 45)
   // a balcony hangs outside the footprint — widen all margins to fit it
   if (L.balcony) margin = Math.max(margin, L.balcony.depth * S.ppm + 18)
+  // plot boundary / pool live outside the building — reserve yard space
+  const plotPad = S.plotBoundary || S.pool ? rand(1.6, 3.6) : 0
+  if (plotPad) margin = Math.max(margin, plotPad * S.ppm + 34)
   const px = (m) => margin + m * S.ppm
   const IW = Math.round(L.W * S.ppm + margin * 2)
   const IH = Math.round(L.H * S.ppm + margin * 2 + (S.titleBlock ? 34 : 0))
@@ -351,6 +361,40 @@ function renderSample(L, S) {
   }
   msk.push(`<rect width="${IW}" height="${IH}" fill="#000000"/>`)
 
+  // --- site context (image only, never mask): plot boundary, pool ---------
+  if (S.plotBoundary) {
+    const j = () => rand(-0.25, 0.25) // survey lines are never perfectly square
+    const p0 = { x: px(-plotPad + j()), y: px(-plotPad + j()) }
+    const p1 = { x: px(L.W + plotPad + j()), y: px(-plotPad + j()) }
+    const p2 = { x: px(L.W + plotPad + j()), y: px(L.H + plotPad + j()) }
+    const p3 = { x: px(-plotPad + j()), y: px(L.H + plotPad + j()) }
+    const red = '#cc2222'
+    img.push(`<polygon points="${[p0, p1, p2, p3].map((p) => f1(p.x) + ',' + f1(p.y)).join(' ')}" fill="none" stroke="${red}" stroke-width="2" stroke-dasharray="9 6"/>`)
+    for (const p of [p0, p1, p2, p3]) {
+      img.push(`<circle cx="${f1(p.x)}" cy="${f1(p.y)}" r="7" fill="#ffffff" stroke="${S.ink}" stroke-width="1.4"/>` +
+        `<path d="M${f1(p.x)} ${f1(p.y)} L${f1(p.x + 7)} ${f1(p.y)} A7 7 0 0 1 ${f1(p.x)} ${f1(p.y + 7)} Z" fill="${S.ink}"/>`)
+    }
+    const plotW = (p1.x - p0.x) / S.ppm
+    const plotH = (p3.y - p0.y) / S.ppm
+    img.push(`<text x="${f1((p0.x + p1.x) / 2)}" y="${f1(p0.y - 10)}" font-family="${S.font}" font-size="14" font-weight="bold" fill="${S.ink}" text-anchor="middle">${plotW.toFixed(2)}m</text>`)
+    img.push(`<text x="${f1(p0.x - 12)}" y="${f1((p0.y + p3.y) / 2)}" font-family="${S.font}" font-size="14" font-weight="bold" fill="${S.ink}" text-anchor="middle" transform="rotate(-90 ${f1(p0.x - 12)} ${f1((p0.y + p3.y) / 2)})">${plotH.toFixed(2)}m</text>`)
+    // setback line + note
+    const sb = rand(0.6, 1.2)
+    img.push(`<rect x="${f1(p0.x + sb * S.ppm)}" y="${f1(p0.y + sb * S.ppm)}" width="${f1(p1.x - p0.x - 2 * sb * S.ppm)}" height="${f1(p3.y - p0.y - 2 * sb * S.ppm)}" fill="none" stroke="#3a9a3a" stroke-width="1" stroke-dasharray="5 4"/>`)
+    img.push(`<text x="${f1(p0.x + sb * S.ppm + 6)}" y="${f1(p0.y + sb * S.ppm - 4)}" font-family="${S.font}" font-size="8" fill="#3a9a3a">${sb.toFixed(1)}m setback</text>`)
+    img.push(`<text x="${f1(p2.x - 8)}" y="${f1(p2.y - 12)}" font-family="${S.font}" font-size="12" fill="${S.ink}" text-anchor="end">AREA : ${Math.round(plotW * plotH)}sqm</text>`)
+  }
+  if (S.pool) {
+    // dashed pool rectangle in the yard (above or right of the building)
+    const above = chance(0.6)
+    const pw = rand(3, 6) * S.ppm
+    const ph = rand(1.6, 3) * S.ppm
+    const x0 = above ? px(rand(1, Math.max(1.2, L.W - 6))) : px(L.W + 0.4)
+    const y0 = above ? px(-plotPad) + rand(8, 24) : px(rand(1, Math.max(1.2, L.H - 4)))
+    img.push(`<rect x="${f1(x0)}" y="${f1(y0)}" width="${f1(pw)}" height="${f1(ph)}" fill="none" stroke="${S.ink}" stroke-width="1.4" stroke-dasharray="7 5"/>` +
+      `<rect x="${f1(x0 + 6)}" y="${f1(y0 + 6)}" width="${f1(pw - 12)}" height="${f1(ph - 12)}" fill="none" stroke="${S.ink}" stroke-width="0.8" stroke-dasharray="4 4"/>`)
+  }
+
   // room tints + furniture live under the walls
   if (S.tintRooms) {
     for (const r of L.rooms) {
@@ -358,6 +402,34 @@ function renderSample(L, S) {
     }
   }
   if (S.furniture) for (const r of L.rooms) img.push(furnitureSVG(r, px, S))
+  if (S.stairs) {
+    // stair treads + UP arrow in the smallest suitable room — the classic
+    // parallel-line hatch that models love to misread as walls
+    const cand = [...L.rooms].filter((r) => r.w > 1.6 && r.h > 1.6).sort((a, b) => a.area - b.area)[0]
+    if (cand) {
+      const vertical = cand.h >= cand.w
+      const n = Math.floor((vertical ? cand.h : cand.w) * 0.55 / 0.27)
+      const parts = []
+      for (let i = 0; i < n; i++) {
+        const t = 0.3 + i * 0.27
+        if (vertical) {
+          parts.push(`<line x1="${f1(px(cand.x + 0.25))}" y1="${f1(px(cand.y + t))}" x2="${f1(px(cand.x + cand.w - 0.25))}" y2="${f1(px(cand.y + t))}" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>`)
+        } else {
+          parts.push(`<line x1="${f1(px(cand.x + t))}" y1="${f1(px(cand.y + 0.25))}" x2="${f1(px(cand.x + t))}" y2="${f1(px(cand.y + cand.h - 0.25))}" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>`)
+        }
+      }
+      // direction arrow + UP label
+      const ax = px(cand.x + cand.w / 2)
+      const ay0 = px(cand.y + cand.h - 0.35)
+      const ay1 = px(cand.y + 0.4)
+      if (vertical) {
+        parts.push(`<line x1="${f1(ax)}" y1="${f1(ay0)}" x2="${f1(ax)}" y2="${f1(ay1)}" stroke="${S.ink}" stroke-width="1.1"/>`)
+        parts.push(`<path d="M${f1(ax)} ${f1(ay1)} l-4 8 l8 0 Z" fill="${S.ink}"/>`)
+      }
+      parts.push(`<text x="${f1(ax + 6)}" y="${f1(px(cand.y + cand.h / 2))}" font-family="${S.font}" font-size="9" font-weight="bold" fill="${pick(['#e08b2d', S.ink])}">UP</text>`)
+      img.push(parts.join(''))
+    }
+  }
 
   // --- walls -------------------------------------------------------------
   if (S.wallStyle === 'hatch') {
@@ -368,6 +440,7 @@ function renderSample(L, S) {
     const rect = `x="${f1(r.x)}" y="${f1(r.y)}" width="${f1(r.w)}" height="${f1(r.h)}"`
     if (S.wallStyle === 'solid') img.push(`<rect ${rect} fill="${S.ink}"/>`)
     else if (S.wallStyle === 'gray') img.push(`<rect ${rect} fill="#8b8f94" stroke="${S.ink}" stroke-width="1"/>`)
+    else if (S.wallStyle === 'cadgray') img.push(`<rect ${rect} fill="#565b60" stroke="#2c3035" stroke-width="0.8"/>`)
     else if (S.wallStyle === 'hatch') img.push(`<rect ${rect} fill="url(#hatch)" stroke="${S.ink}" stroke-width="1.2"/>`)
     else img.push(`<rect ${rect} fill="#ffffff" stroke="${S.ink}" stroke-width="${f1(S.thinStroke * 1.2)}"/>`)
     msk.push(`<rect ${rect} fill="#ff0000"/>`)
@@ -471,6 +544,43 @@ function renderSample(L, S) {
   if (S.caption) {
     const total = L.rooms.reduce((s, r) => s + r.area, 0)
     img.push(`<text x="${f1(IW / 2)}" y="${f1(IH - 10)}" font-family="${S.font}" font-size="${f1(rand(11, 15))}" fill="${S.ink}" text-anchor="middle" font-weight="bold">TOTAL AREA = ${Math.round(total)} m²</text>`)
+  }
+
+  // --- interior dimension chains (image only) — the defining feature of CAD
+  // exports: thin colored lines with end ticks and mm labels running straight
+  // through rooms, over walls, everywhere. Pure distractor.
+  if (S.dimChains) {
+    const parts = []
+    const tick = (x, y, vert) => vert
+      ? `<line x1="${f1(x - 3)}" y1="${f1(y + 3)}" x2="${f1(x + 3)}" y2="${f1(y - 3)}" stroke="${S.dimColor}" stroke-width="1"/>`
+      : `<line x1="${f1(x - 3)}" y1="${f1(y + 3)}" x2="${f1(x + 3)}" y2="${f1(y - 3)}" stroke="${S.dimColor}" stroke-width="1"/>`
+    for (const r of L.rooms) {
+      if (!chance(0.55)) continue
+      if (chance(0.5) && r.w > 1.6) {
+        // horizontal chain across the room
+        const y = px(r.y + r.h * rand(0.2, 0.8))
+        const x0 = px(r.x + 0.15)
+        const x1 = px(r.x + r.w - 0.15)
+        parts.push(`<line x1="${f1(x0)}" y1="${f1(y)}" x2="${f1(x1)}" y2="${f1(y)}" stroke="${S.dimColor}" stroke-width="0.9"/>`)
+        parts.push(tick(x0, y), tick(x1, y))
+        parts.push(`<text x="${f1((x0 + x1) / 2)}" y="${f1(y - 3)}" font-family="${S.font}" font-size="8" fill="${S.dimColor}" text-anchor="middle">${Math.round((r.w - 0.3) * 1000)}</text>`)
+      }
+      if (chance(0.5) && r.h > 1.6) {
+        const x = px(r.x + r.w * rand(0.2, 0.8))
+        const y0 = px(r.y + 0.15)
+        const y1 = px(r.y + r.h - 0.15)
+        parts.push(`<line x1="${f1(x)}" y1="${f1(y0)}" x2="${f1(x)}" y2="${f1(y1)}" stroke="${S.dimColor}" stroke-width="0.9"/>`)
+        parts.push(tick(x, y0, true), tick(x, y1, true))
+        parts.push(`<text x="${f1(x - 3)}" y="${f1((y0 + y1) / 2)}" font-family="${S.font}" font-size="8" fill="${S.dimColor}" text-anchor="middle" transform="rotate(-90 ${f1(x - 3)} ${f1((y0 + y1) / 2)})">${Math.round((r.h - 0.3) * 1000)}</text>`)
+      }
+    }
+    // a couple of long chains spanning the whole building, CAD-style
+    for (let i = 0; i < randi(1, 2); i++) {
+      const y = px(rand(0.5, L.H - 0.5))
+      parts.push(`<line x1="${f1(px(0))}" y1="${f1(y)}" x2="${f1(px(L.W))}" y2="${f1(y)}" stroke="${S.dimColor}" stroke-width="0.8" opacity="0.85"/>`)
+      parts.push(tick(px(0), y), tick(px(L.W), y))
+    }
+    img.push(parts.join(''))
   }
 
   if (S.northArrow) {

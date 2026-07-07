@@ -162,6 +162,15 @@ effort:
       door components whose surroundings are substantially window-class get
       dropped (30 spurious doors → 7 real ones on the OOD apartment test,
       and the door-width scale fallback recovered from 2× off to ~15% off).
+- [x] Generator v3 (CAD dialect, motivated by a real architect's drawing
+      committed as a fixture): red dashed plot boundaries with survey
+      markers + plot dims + AREA captions, green setback lines, dashed
+      pool rectangles, orange/gray dimension chains running THROUGH rooms
+      with mm labels and end ticks, stair treads + UP arrows, and a
+      cadgray wall fill. All image-only distractors - masks unchanged.
+      v2 measured on this style: door IoU 0.923 -> 0.877.
+- [ ] Retrain on v3 data (same Colab notebook) -> model-v3 release ->
+      update MODEL_URL in scripts/fetch-model.mjs
 - [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
       keystone warp) / real-data flywheel
