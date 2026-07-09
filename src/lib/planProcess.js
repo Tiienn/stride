@@ -103,6 +103,9 @@ function buildInterior(analysis, ppm) {
       width: clamp((d.width || 0.9 * ppm) / ppm, 0.75, d.kind === 'doorway' ? 3.2 : 1.5),
       height: 2.05,
       sillHeight: 0,
+      // door-swing read from the plan's quarter-circle arc (pixel points → world)
+      hinge: d.hingePixel ? toWorld(d.hingePixel) : null,
+      swing: d.swingPixel ? toWorld(d.swingPixel) : null,
     })
   }
   for (const w of analysis.windows || []) {
@@ -144,8 +147,12 @@ function buildInterior(analysis, ppm) {
 // lines with arrowheads — as walls, closing off rooms. The printed dimensions
 // themselves pin down exactly where those lines are: drop any wall that
 // coincides with a dimension segment (parallel, sitting on its line, and
-// substantially overlapping it). Real walls run parallel to their dimension
-// lines but offset by tens of px, so the on-line tightness is the safety.
+// substantially overlapping it). A genuine misread traces the SAME pixels as
+// the dimension line (offset ~0-2px); a real adjacent wall sits a witness-line
+// gap away — measured at ~8-9px on a real CAD plan's kitchen wall, which a
+// thickness-scaled tolerance (formerly Math.max(7, wall.thickness)) could
+// swallow for any normally-thick partition. Keep the tolerance flat and small,
+// well under that real-world gap, regardless of the candidate wall's thickness.
 function dropDimensionLineWalls(walls, dimensions) {
   const dims = (dimensions || []).filter(
     (d) => d?.startPixel && d?.endPixel &&
@@ -158,7 +165,7 @@ function dropDimensionLineWalls(walls, dimensions) {
     const wdx = w.end.x - w.start.x, wdy = w.end.y - w.start.y
     const wlen = Math.hypot(wdx, wdy)
     if (wlen < 1e-6) return true
-    const onLineTol = Math.max(7, w.thickness || 0)
+    const onLineTol = 5
     for (const d of dims) {
       const ddx = d.endPixel.x - d.startPixel.x, ddy = d.endPixel.y - d.startPixel.y
       const dlen = Math.hypot(ddx, ddy)
@@ -610,21 +617,43 @@ function enforcePassableOpenings(walls) {
 }
 
 function attachOpening(walls, point, opening) {
+  // hinge/swing are world-space swing hints from the plan (may be absent); the
+  // rest are the opening's own props. Keep them out of the stored opening.
+  const { hinge = null, swing = null, ...props } = opening
   let best = null
   for (const w of walls) {
     const { t, d } = projectOnSegment(point, w.start, w.end)
     if (!best || d < best.d) best = { w, t, d }
   }
   if (!best || best.d > 1.0) return // nothing sensible nearby
-  const len = dist2d(best.w.start, best.w.end)
-  const half = opening.width / 2 + 0.05
+  const wall = best.w
+  const len = dist2d(wall.start, wall.end)
+  const half = props.width / 2 + 0.05
   const pos = clamp(best.t * len, half, Math.max(half, len - half))
-  if (opening.width > len - 0.15) opening.width = Math.max(0.6, len - 0.3)
+  if (props.width > len - 0.15) props.width = Math.max(0.6, len - 0.3)
   // Reject overlapping openings on the same wall
-  for (const o of best.w.openings) {
-    if (Math.abs(o.position - pos) < (o.width + opening.width) / 2 + 0.1) return
+  for (const o of wall.openings) {
+    if (Math.abs(o.position - pos) < (o.width + props.width) / 2 + 0.1) return
   }
-  best.w.openings.push({ id: uid('open'), ...opening, position: pos })
+  // Door-swing metadata: which OPENING end the leaf hinges on, and which side
+  // of the wall it sweeps into. Defaults ('start' / +1) reproduce the legacy
+  // hardcoded behavior when the plan carried no arc.
+  const ux = (wall.end.x - wall.start.x) / (len || 1)
+  const uz = (wall.end.z - wall.start.z) / (len || 1)
+  let hingeEnd = 'start'
+  if (hinge) {
+    const hingeT = (hinge.x - wall.start.x) * ux + (hinge.z - wall.start.z) * uz
+    hingeEnd = hingeT < pos ? 'start' : 'end'
+  }
+  let swingSide = 1
+  if (swing) {
+    const cx = wall.start.x + ux * pos
+    const cz = wall.start.z + uz * pos
+    // sign of cross(wallDir, swing − openingCenter)
+    const cross = ux * (swing.z - cz) - uz * (swing.x - cx)
+    swingSide = cross < 0 ? -1 : 1
+  }
+  wall.openings.push({ id: uid('open'), ...props, position: pos, hingeEnd, swingSide })
 }
 
 function projectOnSegment(p, a, b) {
