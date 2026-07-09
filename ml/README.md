@@ -202,5 +202,13 @@ effort:
       mIoU(no-bg) 0.941 (v3 scored 0.940 on the same set, but with the
       localized phantom walls aggregate IoU under-weighs).
 - [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
+- [ ] Generator v5 (from a real blue-CAD plan): COLORED wall styles - blue/
+      purple outline walls with red/cyan fixture linework (all current
+      styles draw walls dark); BLACK dimension chains with filled arrowheads
+      at real CAD density (v3/v4 dims are orange/gray with tick ends);
+      curved exterior walls. The blue plan's dimension lines read as walls
+      even for v4 - the pipeline now kills them deterministically via the
+      printed dimensions (planProcess dropDimensionLineWalls), but the model
+      should stop producing them in the first place.
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
       keystone warp) / real-data flywheel
