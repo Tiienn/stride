@@ -6,6 +6,12 @@ import * as P from './furniture/pieces.jsx'
 import { roomConfig } from '../lib/roomTypes.js'
 import { registerCollider } from '../lib/interact.js'
 import { repairCirculation } from '../lib/circulation.js'
+import { mapDetectedFurniture } from '../lib/detectedFurniture.js'
+
+// Chair is normally rendered only inside DiningSet, so pieces.jsx never gave it
+// a standalone footprint. A detected loose chair goes through the placer, which
+// needs one — supply a fallback matching the Chair's seat box.
+if (!P.Chair.foot) P.Chair.foot = () => ({ w: 0.44, d: 0.44 })
 
 // Deterministic per-room randomness — same plan always furnishes the same way
 function rng(seedStr) {
@@ -245,6 +251,23 @@ function makePlacer(plan, room, info, rand) {
   return { againstEdge, atPoint, inCorner, items, rand }
 }
 
+// Seat one detected spec at its world point via the placer. atPoint runs the
+// full fits() gauntlet; if the exact point fails, retry nudged ±0.15m on x
+// then z before giving up (the analyzer's box center can sit a touch inside a
+// wall). Returns true only if the piece was actually placed.
+function placeDetected(p, spec) {
+  const Comp = P[spec.pieceKey]
+  if (!Comp) return false
+  const opts = { height: spec.height, walkable: spec.walkable }
+  const nudges = [[0, 0], [0.15, 0], [-0.15, 0], [0, 0.15], [0, -0.15]]
+  for (const [dx, dz] of nudges) {
+    if (p.atPoint(Comp, spec.props, spec.footArgs, spec.x + dx, spec.z + dz, spec.rotY, opts)) {
+      return true
+    }
+  }
+  return false
+}
+
 // --- layouts per furniture set ------------------------------------------------
 
 const LAYOUTS = {
@@ -435,12 +458,40 @@ const LAYOUTS = {
 export default function Furniture({ plan }) {
   const allItems = useMemo(() => {
     const out = []
+
+    // Furniture the analyzer actually detected on the plan, in world space.
+    // Bucket each spec into the room whose grid cells contain its footpoint;
+    // specs landing outside every room are dropped.
+    const detected = mapDetectedFurniture(plan)
+    const detectedByRoom = new Map()
+    for (const spec of detected) {
+      const room = plan.rooms.find((r) => cellIsRoom(plan, r, spec.x, spec.z))
+      if (!room) continue
+      if (!detectedByRoom.has(room.id)) detectedByRoom.set(room.id, [])
+      detectedByRoom.get(room.id).push(spec)
+    }
+
     for (const room of plan.rooms) {
       const setKey = roomConfig(room.type).furniture
       const layout = LAYOUTS[setKey] || LAYOUTS.none
       const info = analyzeRoom(plan, room)
       const placer = makePlacer(plan, room, info, rng(room.id + plan.name))
-      layout(placer, room)
+
+      // Place the plan's real detected pieces first, through the same placer
+      // (wall-penetration + collision + door-swing checks). Skip any that
+      // can't be seated even after small nudges — never force a piece through
+      // a wall.
+      let placedDetected = 0
+      for (const spec of detectedByRoom.get(room.id) || []) {
+        if (placeDetected(placer, spec)) placedDetected++
+      }
+
+      // WHY: two or more real pieces landed => the plan told us how this room
+      // is furnished, so trust it and skip the generic auto-layout. With 0-1
+      // we still run the fallback layout; the detected piece(s) already count
+      // as obstacles because commit() registered them.
+      if (placedDetected < 2) layout(placer, room)
+
       // walkability guarantee: every door of the room must stay reachable by
       // the player capsule — evict furniture that pinches the circulation
       repairCirculation(plan, room, placer.items)
