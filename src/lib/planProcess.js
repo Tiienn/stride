@@ -72,7 +72,10 @@ function buildInterior(analysis, ppm) {
   const cy = size.height / 2
   const toWorld = (p) => ({ x: (p.x - cx) / ppm, z: (p.y - cy) / ppm })
 
-  let walls = (analysis.walls || [])
+  // Analyzers misread dimension chains (long thin lines with arrowheads) as
+  // walls, closing off rooms; the printed dimensions tell us exactly where
+  // those lines are. Filter in px-space, before the px→world conversion.
+  let walls = dropDimensionLineWalls(analysis.walls || [], analysis.dimensions)
     .filter((w) => w?.start && w?.end)
     .map((w) => ({
       id: uid('wall'),
@@ -123,12 +126,58 @@ function buildInterior(analysis, ppm) {
       labeledArea: r.labeledArea || null,
     }))
 
-  return finalizeInteriorPlan({
+  const plan = finalizeInteriorPlan({
     planType: analysis.planType === 'floor_office' ? 'office' : 'floor',
     name: analysis.planName || 'Uploaded plan',
     walls,
     rooms,
     scaleInfo: { pixelsPerMeter: ppm, confidence: analysis.scale?.confidence ?? 0.5, source: analysis.scale?.source || 'estimated' },
+  })
+  // Expose this pass's exact px→world transform (world.x = (px.x−cx)/ppm,
+  // world.z = (px.y−cy)/ppm) and pass detected furniture through verbatim.
+  plan.pxToWorld = { ppm, cx, cy }
+  plan.furniturePx = analysis.furniture || []
+  return plan
+}
+
+// Analyzers (neural net / vision) misread printed dimension chains — long thin
+// lines with arrowheads — as walls, closing off rooms. The printed dimensions
+// themselves pin down exactly where those lines are: drop any wall that
+// coincides with a dimension segment (parallel, sitting on its line, and
+// substantially overlapping it). Real walls run parallel to their dimension
+// lines but offset by tens of px, so the on-line tightness is the safety.
+function dropDimensionLineWalls(walls, dimensions) {
+  const dims = (dimensions || []).filter(
+    (d) => d?.startPixel && d?.endPixel &&
+      Math.hypot(d.endPixel.x - d.startPixel.x, d.endPixel.y - d.startPixel.y) >= 40
+  )
+  if (!dims.length) return walls
+  const SIN5 = Math.sin((5 * Math.PI) / 180)
+  return walls.filter((w) => {
+    if (!w?.start || !w?.end) return true
+    const wdx = w.end.x - w.start.x, wdy = w.end.y - w.start.y
+    const wlen = Math.hypot(wdx, wdy)
+    if (wlen < 1e-6) return true
+    const onLineTol = Math.max(7, w.thickness || 0)
+    for (const d of dims) {
+      const ddx = d.endPixel.x - d.startPixel.x, ddy = d.endPixel.y - d.startPixel.y
+      const dlen = Math.hypot(ddx, ddy)
+      // parallel: |cross| / (len·len) < sin(5°)
+      if (Math.abs(wdx * ddy - wdy * ddx) / (wlen * dlen) >= SIN5) continue
+      const ux = ddx / dlen, uy = ddy / dlen // dim unit
+      const nx = -uy, ny = ux // dim normal
+      // both wall endpoints on the dim's infinite line
+      const perpS = Math.abs((w.start.x - d.startPixel.x) * nx + (w.start.y - d.startPixel.y) * ny)
+      const perpE = Math.abs((w.end.x - d.startPixel.x) * nx + (w.end.y - d.startPixel.y) * ny)
+      if (perpS >= onLineTol || perpE >= onLineTol) continue
+      // overlap: fraction of the wall projecting within the dim span (±12px for arrowheads)
+      const tS = (w.start.x - d.startPixel.x) * ux + (w.start.y - d.startPixel.y) * uy
+      const tE = (w.end.x - d.startPixel.x) * ux + (w.end.y - d.startPixel.y) * uy
+      const lo = Math.max(Math.min(tS, tE), -12)
+      const hi = Math.min(Math.max(tS, tE), dlen + 12)
+      if ((hi - lo) / wlen >= 0.55) return false
+    }
+    return true
   })
 }
 

@@ -19,7 +19,7 @@ const ANALYSIS_TOOL = {
   input_schema: {
     type: 'object',
     additionalProperties: false,
-    required: ['planType', 'confidence', 'planName', 'imageSize', 'walls', 'doors', 'windows', 'rooms', 'siteBoundary', 'siteArea', 'roadSide', 'dimensions', 'scale'],
+    required: ['planType', 'confidence', 'planName', 'imageSize', 'walls', 'doors', 'windows', 'rooms', 'furniture', 'siteBoundary', 'siteArea', 'roadSide', 'dimensions', 'scale'],
     properties: {
       planType: {
         type: 'string',
@@ -100,6 +100,26 @@ const ANALYSIS_TOOL = {
           },
         },
       },
+      furniture: {
+        type: 'array',
+        description: 'Interior plans only. Every recognizable furniture/fixture symbol, one entry each.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['type', 'center', 'width', 'depth', 'rotationDeg'],
+          properties: {
+            type: {
+              type: 'string',
+              enum: ['bed', 'sofa', 'armchair', 'dining_table', 'coffee_table', 'desk', 'chair', 'wardrobe', 'bookshelf', 'tv_unit', 'kitchen_run', 'fridge', 'sink', 'hob', 'toilet', 'shower', 'bathtub', 'washbasin', 'plant', 'rug'],
+            },
+            center: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            width: { type: 'number', description: "px, along the symbol's local long axis (local x) BEFORE rotation" },
+            depth: { type: 'number', description: "px, along the symbol's local y BEFORE rotation" },
+            // nullable: orientation is often ambiguous for square-ish symbols; emit null rather than guess.
+            rotationDeg: { type: ['number', 'null'], description: '0 = long axis horizontal (along image x); positive = clockwise in image space; null if unclear' },
+          },
+        },
+      },
       siteBoundary: {
         type: 'array',
         description: 'Site plans only. The parcel boundary polygon in pixels, ordered, closed implicitly.',
@@ -168,6 +188,7 @@ C. Trace the building's exterior outline as a CLOSED loop of wall segments. Exte
 D. Then trace the interior partition walls room by room (8–15 px typical). Every wall endpoint must either share exact coordinates with another wall's endpoint (corner) or land exactly ON another wall's line (T-junction). A floating, unconnected wall end is almost always a tracing error — reconsider it.
 E. Walk your room list: every room MUST have at least one door or open doorway in its walls. If a room in your extraction has none, you missed an opening — look again at gaps and arcs along that room's walls before recording.
 F. Openings sit INSIDE walls: a door's center must lie on a wall segment you traced, with wall continuing on both sides (or ending at a corner).
+G. Identify every furniture and fixture symbol and record its type, center, size and rotation in furniture: beds, sofas, armchairs, a dining table WITH its surrounding chairs as ONE dining_table entry, coffee tables, desks, chairs, wardrobes (often a rectangle with an X through it), bookshelves, TV units, kitchen counter runs, fridges, sinks, hob/stove burner circles, toilets, showers (often a square with an X or diagonal hatch in a bathroom corner), bathtubs, washbasins, plants and rugs. width is the symbol's extent along its local x (before rotation), depth its local y, center the symbol's bounding-box center. Furniture symbols are NEVER walls: report them ONLY in furniture, never in walls. Record a kitchen counter run as ONE kitchen_run entry, plus separate entries for any fridge/sink/hob symbols drawn on it. Do NOT skip bathroom fixtures (toilet, shower, bathtub, washbasin) — they identify the room type.
 
 DO NOT trace as walls: furniture, kitchen counters, wardrobes, stairs, dimension lines, extension lines, hatching, text, door leaves or their swing arcs. If a "wall" is thinner than every other line and touches nothing, it is probably a dimension line.
 
