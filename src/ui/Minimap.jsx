@@ -126,19 +126,26 @@ function buildStaticLayer(plan, dpr, size, { labels = false } = {}) {
           ctx.lineTo(X(wall.start.x + ux * b), Z(wall.start.z + uz * b))
           ctx.stroke()
         } else if (labels && (o.type === 'door' || o.type === 'entrance') && o.width * scale > 9) {
-          // plan-style door symbol: leaf + quarter swing arc from the hinge
-          const hx = X(wall.start.x + ux * a)
-          const hz = Z(wall.start.z + uz * a)
+          // plan-style door symbol: leaf + quarter swing arc, hinged and swung
+          // to match the 3D door (o.hingeEnd / o.swingSide read from the plan).
+          const hingeAtEnd = o.hingeEnd === 'end'
+          const ht = hingeAtEnd ? b : a           // hinge at the far/near opening end
+          const hx = X(wall.start.x + ux * ht)
+          const hz = Z(wall.start.z + uz * ht)
           const r = o.width * scale
-          const theta = Math.atan2(uz, ux) // canvas y == world z, north-up
+          const s = o.swingSide === -1 ? -1 : 1
+          const sigma = hingeAtEnd ? -1 : 1        // closed leaf points ±along the wall
+          const angClosed = Math.atan2(sigma * uz, sigma * ux)
+          const nx = -uz * s, nz = ux * s          // world normal of the swing side
+          const angOpen = Math.atan2(nz, nx)
           ctx.strokeStyle = 'rgba(232, 183, 74, 0.9)'
           ctx.lineWidth = Math.max(1.2, scale * 0.05)
           ctx.beginPath()
           ctx.moveTo(hx, hz)
-          ctx.lineTo(hx + Math.cos(theta - Math.PI / 2) * r, hz + Math.sin(theta - Math.PI / 2) * r)
+          ctx.lineTo(hx + nx * r, hz + nz * r)     // open leaf
           ctx.stroke()
           ctx.beginPath()
-          ctx.arc(hx, hz, r, theta - Math.PI / 2, theta)
+          ctx.arc(hx, hz, r, angClosed, angOpen, sigma * s < 0)
           ctx.stroke()
         } else {
           // small map (or plain doorway): amber bar so the gap reads as a

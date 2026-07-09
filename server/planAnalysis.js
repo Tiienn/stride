@@ -56,13 +56,20 @@ const ANALYSIS_TOOL = {
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['center', 'width', 'kind', 'wallIndex'],
+          required: ['center', 'width', 'kind', 'wallIndex', 'hingePixel', 'swingPixel'],
           properties: {
             center: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
             width: { type: 'number', description: 'pixels' },
             kind: { type: 'string', enum: ['hinged', 'sliding', 'doorway', 'entrance'] },
             // nullable: the model may not reliably identify which wall the door sits on (unused downstream).
             wallIndex: { type: ['number', 'null'] },
+            // nullable: the leaf's pivot — the CENTER of the quarter-circle swing arc (where its two
+            // straight edges meet / where the leaf line attaches to the wall). null for sliding doors,
+            // plain doorways, or when no arc is readable.
+            hingePixel: { type: ['object', 'null'], additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            // nullable: a point in the middle of the swept region (≈ the arc's midpoint, halfway between
+            // the leaf's open and closed positions); marks which side the door opens into. null when no arc.
+            swingPixel: { type: ['object', 'null'], additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
           },
         },
       },
@@ -175,7 +182,7 @@ CRITICAL RULES:
 1. All coordinates are PIXELS from the image's top-left corner.
 2. Walls are defined by their CENTER LINE, not edges. One wall = ONE segment. Never trace the two drawn faces of a wall as two separate parallel segments.
 3. First classify the plan: an interior floor plan (residential or office) vs a site/land plan (parcel boundary, plot). Site plans show property lines, lot dimensions, north arrows, setbacks, roads — not interior walls.
-4. Doors: quarter-circle arc = hinged door. Gap with no arc = doorway. The building's main entry door has kind "entrance". Real doors are 0.7–1.0 m wide — sanity-check your pixel widths against the scale.
+4. Doors: quarter-circle arc = hinged door. Gap with no arc = doorway. The building's main entry door has kind "entrance". Real doors are 0.7–1.0 m wide — sanity-check your pixel widths against the scale. For a hinged door, also give hingePixel (the arc's CENTER, where the leaf pivots against the wall) and swingPixel (a point mid-arc, halfway through the leaf's sweep) so the 3D door hinges on the right side and opens the right way; both are null for sliding doors, plain doorways, or when the arc is unreadable.
 5. Windows: short parallel lines / thin rectangles crossing exterior walls.
 6. Scale, in priority order: (a) printed dimension labels — bare numbers like 3670 are MILLIMETERS, decimals like 5.37 are METERS; (b) printed total area worked backward; (c) standard door width 0.9m; (d) estimate. Report source and confidence honestly.
 7. Room centers must be INSIDE the room, far from any wall — they seed a flood fill.

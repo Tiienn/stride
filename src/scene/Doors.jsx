@@ -19,7 +19,13 @@ function collectDoors(plan) {
     const uz = (wall.end.z - wall.start.z) / len
     for (const o of wall.openings) {
       if (o.type !== 'door' && o.type !== 'entrance') continue
-      const hingeT = o.position - o.width / 2
+      // Hinge at whichever OPENING end the plan's arc indicated (default 'start').
+      const hingeAtEnd = o.hingeEnd === 'end'
+      const hingeT = hingeAtEnd ? o.position + o.width / 2 : o.position - o.width / 2
+      const farT = hingeAtEnd ? o.position - o.width / 2 : o.position + o.width / 2
+      // Leaf points from the hinge toward the far end: +wall dir for a start
+      // hinge, −wall dir (angle+π) for an end hinge.
+      const swingSide = o.swingSide === -1 ? -1 : 1
       doors.push({
         id: o.id,
         entrance: o.type === 'entrance',
@@ -28,10 +34,14 @@ function collectDoors(plan) {
         thickness: wall.thickness,
         hinge: { x: wall.start.x + ux * hingeT, z: wall.start.z + uz * hingeT },
         end: {
-          x: wall.start.x + ux * (hingeT + o.width),
-          z: wall.start.z + uz * (hingeT + o.width),
+          x: wall.start.x + ux * farT,
+          z: wall.start.z + uz * farT,
         },
-        angle,
+        angle: angle + (hingeAtEnd ? Math.PI : 0),
+        // pivot multiplier: −swingSide for a start hinge, +swingSide for an end
+        // hinge (the leaf's local frame flips with the extra π). Default door
+        // (start hinge, swingSide +1) → −1, i.e. the legacy −OPEN_ANGLE swing.
+        swing: swingSide * (hingeAtEnd ? 1 : -1),
       })
     }
   }
@@ -78,7 +88,7 @@ function Door({ door }) {
   }, [open])
 
   useFrame((_, dt) => {
-    const target = open ? -OPEN_ANGLE : 0
+    const target = open ? door.swing * OPEN_ANGLE : 0
     const next = THREE.MathUtils.damp(current.current, target, 6, dt)
     current.current = next
     if (pivot.current) pivot.current.rotation.y = next
