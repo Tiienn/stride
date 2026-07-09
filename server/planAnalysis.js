@@ -6,12 +6,20 @@ const DEFAULT_MODEL = 'claude-sonnet-5'
 
 // The tool schema doubles as the output contract: forcing tool use makes the
 // model return validated JSON instead of prose. Pixel space, top-left origin.
+// strict: true guarantees the tool_use.input matches this schema exactly, so the
+// pixel-space parsing downstream never has to defend against a malformed shape.
+// Strict mode requires every object node to carry additionalProperties:false and
+// a `required` listing all its keys; fields that are genuinely absent on some
+// plans (site-only data, un-printed areas, unlocatable pixels) are required-but-
+// nullable so the model can emit null instead of fabricating a value.
 const ANALYSIS_TOOL = {
   name: 'record_plan_analysis',
   description: 'Record the structured analysis of an architectural plan image.',
+  strict: true,
   input_schema: {
     type: 'object',
-    required: ['planType', 'confidence', 'scale'],
+    additionalProperties: false,
+    required: ['planType', 'confidence', 'planName', 'imageSize', 'walls', 'doors', 'windows', 'rooms', 'siteBoundary', 'siteArea', 'roadSide', 'dimensions', 'scale'],
     properties: {
       planType: {
         type: 'string',
@@ -23,6 +31,8 @@ const ANALYSIS_TOOL = {
       planName: { type: 'string', description: 'Short human name, e.g. "2-Bedroom Apartment", "Open-Plan Office", "Corner Plot"' },
       imageSize: {
         type: 'object',
+        additionalProperties: false,
+        required: ['width', 'height'],
         properties: { width: { type: 'number' }, height: { type: 'number' } },
       },
       walls: {
@@ -30,10 +40,11 @@ const ANALYSIS_TOOL = {
         description: 'Interior plans only. Every wall segment, center-line, in pixels. Include ALL segments, even short ones.',
         items: {
           type: 'object',
-          required: ['start', 'end'],
+          additionalProperties: false,
+          required: ['start', 'end', 'thickness', 'isExterior'],
           properties: {
-            start: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
-            end: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            start: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            end: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
             thickness: { type: 'number', description: 'pixels' },
             isExterior: { type: 'boolean' },
           },
@@ -44,12 +55,14 @@ const ANALYSIS_TOOL = {
         description: 'Doors and open doorways. Quarter-circle arcs are hinged doors; plain gaps are doorways.',
         items: {
           type: 'object',
-          required: ['center', 'width'],
+          additionalProperties: false,
+          required: ['center', 'width', 'kind', 'wallIndex'],
           properties: {
-            center: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            center: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
             width: { type: 'number', description: 'pixels' },
             kind: { type: 'string', enum: ['hinged', 'sliding', 'doorway', 'entrance'] },
-            wallIndex: { type: 'number' },
+            // nullable: the model may not reliably identify which wall the door sits on (unused downstream).
+            wallIndex: { type: ['number', 'null'] },
           },
         },
       },
@@ -57,11 +70,13 @@ const ANALYSIS_TOOL = {
         type: 'array',
         items: {
           type: 'object',
-          required: ['center', 'width'],
+          additionalProperties: false,
+          required: ['center', 'width', 'wallIndex'],
           properties: {
-            center: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            center: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
             width: { type: 'number', description: 'pixels' },
-            wallIndex: { type: 'number' },
+            // nullable: as with doors, the host wall may be undetermined (unused downstream).
+            wallIndex: { type: ['number', 'null'] },
           },
         },
       },
@@ -70,30 +85,37 @@ const ANALYSIS_TOOL = {
         description: 'Interior plans only. One entry per enclosed room. The center MUST be a point inside the room, well clear of walls.',
         items: {
           type: 'object',
-          required: ['name', 'center'],
+          additionalProperties: false,
+          required: ['name', 'type', 'center', 'labeledArea'],
           properties: {
             name: { type: 'string', description: 'Label from the plan, or inferred, e.g. "Bedroom 2"' },
             type: {
               type: 'string',
               enum: ['living', 'bedroom', 'kitchen', 'bathroom', 'dining', 'hall', 'office', 'meeting', 'reception', 'storage', 'balcony', 'garage', 'generic'],
             },
-            center: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
-            labeledArea: { type: 'number', description: 'm² if printed on the plan' },
+            center: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            // nullable: only present when the area is printed on the plan — fabricating it
+            // would corrupt the area-based scale calibration downstream.
+            labeledArea: { type: ['number', 'null'], description: 'm² if printed on the plan' },
           },
         },
       },
       siteBoundary: {
         type: 'array',
         description: 'Site plans only. The parcel boundary polygon in pixels, ordered, closed implicitly.',
-        items: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+        items: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
       },
-      siteArea: { type: 'number', description: 'Site plans: parcel area in m² if labeled' },
+      // nullable: only present when a parcel area is labeled (site plans).
+      siteArea: { type: ['number', 'null'], description: 'Site plans: parcel area in m² if labeled' },
       roadSide: {
-        type: 'object',
+        // nullable: absent on interior plans, and on site plans when no road edge is identifiable.
+        type: ['object', 'null'],
         description: 'Site plans: the boundary edge that faces the access road, if identifiable.',
+        additionalProperties: false,
+        required: ['start', 'end'],
         properties: {
-          start: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
-          end: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+          start: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
+          end: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
         },
       },
       dimensions: {
@@ -101,16 +123,21 @@ const ANALYSIS_TOOL = {
         description: 'Every printed dimension with its pixel endpoints — used to compute scale.',
         items: {
           type: 'object',
+          additionalProperties: false,
+          required: ['value', 'unit', 'startPixel', 'endPixel'],
           properties: {
             value: { type: 'number' },
             unit: { type: 'string', enum: ['m', 'mm', 'cm', 'ft'] },
-            startPixel: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
-            endPixel: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            // nullable: the model may read a dimension's value/unit but be unable to pin its
+            // exact pixel endpoints; downstream already skips dimensions missing either.
+            startPixel: { type: ['object', 'null'], additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            endPixel: { type: ['object', 'null'], additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
           },
         },
       },
       scale: {
         type: 'object',
+        additionalProperties: false,
         required: ['pixelsPerMeter', 'confidence', 'source'],
         properties: {
           pixelsPerMeter: { type: 'number' },
@@ -154,11 +181,16 @@ Record your analysis with the record_plan_analysis tool. Be exhaustive with wall
 const CORRECTIONS_TOOL = {
   name: 'record_plan_corrections',
   description: 'Record corrections to a previous plan analysis after re-checking it against the image.',
+  strict: true,
   input_schema: {
     type: 'object',
-    required: ['summary'],
+    additionalProperties: false,
+    required: ['summary', 'missedWalls', 'falseWallIndexes', 'adjustedWalls', 'missedDoors', 'falseDoorIndexes', 'missedWindows', 'falseWindowIndexes', 'missedRooms', 'scaleCorrection'],
     properties: {
       summary: { type: 'string', description: 'One or two sentences on what was wrong, or "extraction verified" if nothing.' },
+      // The correction arrays are required (empty when there's nothing to correct);
+      // sharing walls/doors/windows/rooms item schemas with ANALYSIS_TOOL by identity
+      // means the additionalProperties/required edits above apply to both tools.
       missedWalls: { type: 'array', description: 'Walls present in the image but absent from the analysis.', items: ANALYSIS_TOOL.input_schema.properties.walls.items },
       falseWallIndexes: { type: 'array', description: '0-based indexes into the analysis walls array of walls that do NOT exist in the image (furniture, dimension lines, double-traced faces).', items: { type: 'number' } },
       adjustedWalls: {
@@ -166,11 +198,12 @@ const CORRECTIONS_TOOL = {
         description: 'Walls whose endpoints are significantly wrong (off by more than ~15px).',
         items: {
           type: 'object',
+          additionalProperties: false,
           required: ['index', 'start', 'end'],
           properties: {
             index: { type: 'number' },
-            start: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
-            end: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            start: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
+            end: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
           },
         },
       },
@@ -179,7 +212,9 @@ const CORRECTIONS_TOOL = {
       missedWindows: { type: 'array', items: ANALYSIS_TOOL.input_schema.properties.windows.items },
       falseWindowIndexes: { type: 'array', items: { type: 'number' } },
       missedRooms: { type: 'array', items: ANALYSIS_TOOL.input_schema.properties.rooms.items },
-      scaleCorrection: ANALYSIS_TOOL.input_schema.properties.scale,
+      // nullable via anyOf: usually there is no scale correction. The shared scale schema is
+      // required-non-null at the top level, so we wrap (not mutate) it to allow null here.
+      scaleCorrection: { anyOf: [ANALYSIS_TOOL.input_schema.properties.scale, { type: 'null' }] },
     },
   },
 }
@@ -194,6 +229,22 @@ Check, in order:
 5. SCALE: spot-check one printed dimension against its pixel length; correct the scale if it's off by more than ~10%. Bare numbers like 3670 are millimeters.
 
 Report ONLY genuine discrepancies — do not nudge coordinates that are roughly right. If the extraction is faithful, record an empty correction with summary "extraction verified". Always respond via the record_plan_corrections tool.`
+
+// Strict tool use is newer than the rest of this call path and can't be exercised
+// locally without a live key, so guard against it 400ing every upload in production
+// (a past regression shipped an untestable param that did exactly that): if the API
+// rejects the request with a 400, retry ONCE with strict stripped from every tool.
+// Maps the tools array to new objects so the module-level constants stay untouched.
+async function createWithStrictFallback(client, params) {
+  try {
+    return await client.messages.create(params)
+  } catch (err) {
+    if (err?.status !== 400) throw err
+    console.warn(`[planAnalysis] strict tool use rejected (${err?.message}); retrying without strict`)
+    const tools = (params.tools || []).map(({ strict, ...rest }) => rest)
+    return await client.messages.create({ ...params, tools })
+  }
+}
 
 export async function analyzePlanImage(body, opts = {}) {
   if (!opts.apiKey) {
@@ -213,7 +264,7 @@ export async function analyzePlanImage(body, opts = {}) {
   const { apiKey, model } = opts
 
   const client = new Anthropic({ apiKey })
-  const response = await client.messages.create({
+  const response = await createWithStrictFallback(client, {
     model: model || DEFAULT_MODEL,
     max_tokens: 16000,
     system: SYSTEM_PROMPT,
@@ -265,7 +316,7 @@ async function refinePlanAnalysis(body, { apiKey, model }) {
   }
 
   const client = new Anthropic({ apiKey })
-  const response = await client.messages.create({
+  const response = await createWithStrictFallback(client, {
     model: model || DEFAULT_MODEL,
     max_tokens: 8000,
     system: REFINE_SYSTEM_PROMPT,
