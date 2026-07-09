@@ -296,6 +296,28 @@ function wallSegments(L) {
 const FONTS = ['DejaVu Sans', 'FreeSans', 'DejaVu Serif', 'DejaVu Sans Mono']
 
 function sampleStyle() {
+  // v5 "colored CAD" dialect: ~30% of plans draw walls in a saturated
+  // blue/purple (occasionally dark-red/green) instead of dark ink on white,
+  // dimensions as BLACK filled-triangle arrowhead chains, and fixtures in thin
+  // red/cyan linework — the shape of a real user plan the earlier styles never
+  // covered (the net read almost nothing because structure wasn't dark ink).
+  // Image only; the mask classes (bg/wall/door/window) are unchanged.
+  const colored = chance(0.30)
+  let wallInk = null
+  if (colored) {
+    const alt = chance(0.15) // occasional dark-red / green variant, for generality
+    wallInk = {
+      color: alt ? pick(['#9a2323', '#7c1f1f', '#256a25', '#1f5a2f'])
+                 : pick(['#3b3bc4', '#5a4fcf', '#4444bb', '#2f2f9e']),
+      // outline = two colored parallel lines with white between (the real CAD
+      // export look); otherwise a colored solid fill. Outline is the majority,
+      // since the real plan draws walls as blue outline.
+      outline: chance(0.65),
+    }
+  }
+  const dims = colored ? true : chance(0.7)
+  // black arrowhead dimension chains: ALWAYS on colored plans, ~half otherwise
+  const arrowDims = dims && (colored || chance(0.5))
   return {
     ppm: rand(28, 60),
     wallStyle: pick(['solid', 'solid', 'solid', 'double', 'gray', 'hatch', 'cadgray', 'cadgray']),
@@ -304,7 +326,7 @@ function sampleStyle() {
     font: pick(FONTS),
     fontSize: rand(10, 15),
     labelArea: chance(0.75),
-    dims: chance(0.7),
+    dims,
     dimUnit: pick(['m', 'm', 'mm']),
     roomDims: chance(0.3),
     furniture: chance(0.75),
@@ -318,7 +340,7 @@ function sampleStyle() {
     caption: chance(0.4),
     // CAD-drawing context — all pure distractors the model must NOT read as
     // structure (motivated by a real architect's site+floor drawing):
-    dimChains: chance(0.5), // dimension chains INSIDE rooms, mm labels, ticks
+    dimChains: colored ? false : chance(0.5), // orange interior chains; replaced by black arrow chains on colored plans
     dimColor: pick(['#e08b2d', '#e08b2d', '#cc5533', '#666666']),
     plotBoundary: chance(0.35), // red dashed parcel boundary + survey markers + setbacks
     pool: chance(0.25), // dashed pool/deck rectangle outside the building
@@ -331,6 +353,12 @@ function sampleStyle() {
     // v4: an OPEN staircase in a big room, bounded by railing-thin lines the
     // model must not read as walls (real stairs got walled into sealed rooms)
     openStairs: chance(0.4),
+    // v5 colored-CAD fields (see sampleStyle header). Image only; masks unchanged.
+    colored,
+    wallInk, // {color, outline} on colored plans, else null
+    arrowDims, // black filled-triangle arrowhead dimension chains
+    fixtureInk: colored && chance(0.66), // thin red/cyan fixture/furniture linework
+    winInk: colored ? pick(['#0e9bbf', '#1f9ec9', wallInk.color]) : null, // cyan-ish window glazing
   }
 }
 
@@ -343,6 +371,8 @@ const f1 = (v) => (Math.round(v * 10) / 10).toString()
 
 function renderSample(L, S) {
   let margin = S.dims ? rand(55, 95) : rand(20, 45)
+  // v5: stacked black arrowhead chain rows extend well outside the footprint
+  if (S.arrowDims) margin = Math.max(margin, 88)
   // a balcony hangs outside the footprint — widen all margins to fit it
   if (L.balcony) margin = Math.max(margin, L.balcony.depth * S.ppm + 18)
   // plot boundary / pool live outside the building — reserve yard space
@@ -515,7 +545,14 @@ function renderSample(L, S) {
   for (const w of walls) {
     const r = wallRect(w, px, S.ppm)
     const rect = `x="${f1(r.x)}" y="${f1(r.y)}" width="${f1(r.w)}" height="${f1(r.h)}"`
-    if (S.wallStyle === 'solid') img.push(`<rect ${rect} fill="${S.ink}"/>`)
+    if (S.wallInk) {
+      // v5 colored CAD: walls in saturated blue/purple (or dark-red/green).
+      // outline = colored rect stroke over white fill (two parallel colored
+      // lines with white between, like a real CAD export); else a solid fill.
+      if (S.wallInk.outline) img.push(`<rect ${rect} fill="#ffffff" stroke="${S.wallInk.color}" stroke-width="${f1(S.thinStroke * 1.2)}"/>`)
+      else img.push(`<rect ${rect} fill="${S.wallInk.color}"/>`)
+    }
+    else if (S.wallStyle === 'solid') img.push(`<rect ${rect} fill="${S.ink}"/>`)
     else if (S.wallStyle === 'gray') img.push(`<rect ${rect} fill="#8b8f94" stroke="${S.ink}" stroke-width="1"/>`)
     else if (S.wallStyle === 'cadgray') img.push(`<rect ${rect} fill="#565b60" stroke="#2c3035" stroke-width="0.8"/>`)
     else if (S.wallStyle === 'hatch') img.push(`<rect ${rect} fill="url(#hatch)" stroke="${S.ink}" stroke-width="1.2"/>`)
@@ -545,16 +582,17 @@ function renderSample(L, S) {
   }
   for (const w of L.windows) {
     const g = gapRect(w, L.extThick, px, S.ppm)
-    img.push(`<rect x="${f1(g.x)}" y="${f1(g.y)}" width="${f1(g.w)}" height="${f1(g.h)}" fill="#ffffff" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>`)
+    const wc = S.winInk || S.ink // cyan-ish glazing on colored CAD plans
+    img.push(`<rect x="${f1(g.x)}" y="${f1(g.y)}" width="${f1(g.w)}" height="${f1(g.h)}" fill="#ffffff" stroke="${wc}" stroke-width="${f1(S.thinStroke)}"/>`)
     // parallel glazing lines along the wall direction
     for (let i = 1; i < S.windowLines; i++) {
       const f = i / S.windowLines
       if (w.axis === 'v') {
         const x = g.x + g.w * f
-        img.push(`<line x1="${f1(x)}" y1="${f1(g.y)}" x2="${f1(x)}" y2="${f1(g.y + g.h)}" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>`)
+        img.push(`<line x1="${f1(x)}" y1="${f1(g.y)}" x2="${f1(x)}" y2="${f1(g.y + g.h)}" stroke="${wc}" stroke-width="${f1(S.thinStroke)}"/>`)
       } else {
         const y = g.y + g.h * f
-        img.push(`<line x1="${f1(g.x)}" y1="${f1(y)}" x2="${f1(g.x + g.w)}" y2="${f1(y)}" stroke="${S.ink}" stroke-width="${f1(S.thinStroke)}"/>`)
+        img.push(`<line x1="${f1(g.x)}" y1="${f1(y)}" x2="${f1(g.x + g.w)}" y2="${f1(y)}" stroke="${wc}" stroke-width="${f1(S.thinStroke)}"/>`)
       }
     }
     msk.push(`<rect x="${f1(g.x)}" y="${f1(g.y)}" width="${f1(g.w)}" height="${f1(g.h)}" fill="#0000ff"/>`)
@@ -577,7 +615,43 @@ function renderSample(L, S) {
   }
 
   // --- dimension lines ---------------------------------------------------
-  if (S.dims) {
+  if (S.dims && S.arrowDims) {
+    // v5: classic CAD dimensioning — BLACK thin lines, small filled-triangle
+    // arrowheads at both ends, extension lines back to the building edge, and
+    // stacked parallel chain rows offset outward (segments closest, overall
+    // furthest), plus a few interior chains. Image only; never in the mask.
+    const xs = [...new Set(L.partitions.filter((p) => p.axis === 'v').map((p) => p.c))].sort((a, b) => a - b)
+    const ys = [...new Set(L.partitions.filter((p) => p.axis === 'h').map((p) => p.c))].sort((a, b) => a - b)
+    // top: row 1 = per-segment chain (partition spacings), row 2 = overall
+    let offH = px(0) - rand(14, 20)
+    let prev = 0
+    for (const c of [...xs, L.W]) {
+      if (c - prev > 0.8) img.push(dimLineSVG(px(prev), offH, px(c), 'h', dimText(c - prev, S), S, true, px(0)))
+      prev = c
+    }
+    offH -= rand(20, 28)
+    img.push(dimLineSVG(px(0), offH, px(L.W), 'h', dimText(L.W, S), S, false, px(0)))
+    // left: same two rows, rotated
+    let offV = px(0) - rand(14, 20)
+    prev = 0
+    for (const c of [...ys, L.H]) {
+      if (c - prev > 0.8) img.push(dimLineSVG(px(prev), offV, px(c), 'v', dimText(c - prev, S), S, true, px(0)))
+      prev = c
+    }
+    offV -= rand(20, 28)
+    img.push(dimLineSVG(px(0), offV, px(L.H), 'v', dimText(L.H, S), S, false, px(0)))
+    // interior arrow chains through a few rooms (no extension lines)
+    for (const r of L.rooms) {
+      if (chance(0.4) && r.w > 2.0) {
+        const y = px(r.y + r.h * rand(0.3, 0.7))
+        img.push(dimLineSVG(px(r.x + 0.12), y, px(r.x + r.w - 0.12), 'h', dimText(r.w - 0.24, S), S, true))
+      }
+      if (chance(0.4) && r.h > 2.0) {
+        const x = px(r.x + r.w * rand(0.3, 0.7))
+        img.push(dimLineSVG(px(r.y + 0.12), x, px(r.y + r.h - 0.12), 'v', dimText(r.h - 0.24, S), S, true))
+      }
+    }
+  } else if (S.dims) {
     img.push(dimLineSVG(px(0), px(0) - rand(24, 38), px(L.W), 'h', dimText(L.W, S), S))
     img.push(dimLineSVG(px(0), px(0) - rand(24, 38), px(L.H), 'v', dimText(L.H, S), S))
     if (chance(0.5)) {
@@ -753,21 +827,45 @@ function dimText(meters, S) {
 
 // dimension line with end ticks + centered label; axis 'h' (along top) or 'v'
 // (down the left edge, rendered by swapping coordinates)
-function dimLineSVG(a, off, b, axis, label, S, minor = false) {
+function dimLineSVG(a, off, b, axis, label, S, minor = false, extendTo = null) {
   const fs = minor ? 8.5 : 10
   const tick = 4
   const mid = (a + b) / 2
+  // v5: classic CAD dimension — black line, filled-triangle arrowheads pointing
+  // outward at each end, thin extension lines back to the building edge when
+  // given. Otherwise the legacy tick-ended style in S.ink.
+  const arrow = S.arrowDims
+  const col = arrow ? '#000000' : S.ink
+  const sz = 5 // arrowhead length
   if (axis === 'h') {
-    return `<line x1="${f1(a)}" y1="${f1(off)}" x2="${f1(b)}" y2="${f1(off)}" stroke="${S.ink}" stroke-width="0.9"/>` +
-      `<line x1="${f1(a)}" y1="${f1(off - tick)}" x2="${f1(a)}" y2="${f1(off + tick)}" stroke="${S.ink}" stroke-width="0.9"/>` +
-      `<line x1="${f1(b)}" y1="${f1(off - tick)}" x2="${f1(b)}" y2="${f1(off + tick)}" stroke="${S.ink}" stroke-width="0.9"/>` +
-      `<text x="${f1(mid)}" y="${f1(off - 4)}" font-family="${S.font}" font-size="${fs}" fill="${S.ink}" text-anchor="middle">${label}</text>`
+    let s = `<line x1="${f1(a)}" y1="${f1(off)}" x2="${f1(b)}" y2="${f1(off)}" stroke="${col}" stroke-width="0.9"/>`
+    if (arrow) {
+      s += `<path d="M${f1(a)} ${f1(off)} L${f1(a + sz)} ${f1(off - sz * 0.38)} L${f1(a + sz)} ${f1(off + sz * 0.38)} Z" fill="${col}"/>` +
+        `<path d="M${f1(b)} ${f1(off)} L${f1(b - sz)} ${f1(off - sz * 0.38)} L${f1(b - sz)} ${f1(off + sz * 0.38)} Z" fill="${col}"/>`
+      if (extendTo != null) {
+        s += `<line x1="${f1(a)}" y1="${f1(off)}" x2="${f1(a)}" y2="${f1(extendTo)}" stroke="${col}" stroke-width="0.5"/>` +
+          `<line x1="${f1(b)}" y1="${f1(off)}" x2="${f1(b)}" y2="${f1(extendTo)}" stroke="${col}" stroke-width="0.5"/>`
+      }
+    } else {
+      s += `<line x1="${f1(a)}" y1="${f1(off - tick)}" x2="${f1(a)}" y2="${f1(off + tick)}" stroke="${col}" stroke-width="0.9"/>` +
+        `<line x1="${f1(b)}" y1="${f1(off - tick)}" x2="${f1(b)}" y2="${f1(off + tick)}" stroke="${col}" stroke-width="0.9"/>`
+    }
+    return s + `<text x="${f1(mid)}" y="${f1(off - 4)}" font-family="${S.font}" font-size="${fs}" fill="${col}" text-anchor="middle">${label}</text>`
   }
   // vertical: line runs down the left, at x=off; a/b are y pixel coords
-  return `<line x1="${f1(off)}" y1="${f1(a)}" x2="${f1(off)}" y2="${f1(b)}" stroke="${S.ink}" stroke-width="0.9"/>` +
-    `<line x1="${f1(off - tick)}" y1="${f1(a)}" x2="${f1(off + tick)}" y2="${f1(a)}" stroke="${S.ink}" stroke-width="0.9"/>` +
-    `<line x1="${f1(off - tick)}" y1="${f1(b)}" x2="${f1(off + tick)}" y2="${f1(b)}" stroke="${S.ink}" stroke-width="0.9"/>` +
-    `<text x="${f1(off - 4)}" y="${f1(mid)}" font-family="${S.font}" font-size="${fs}" fill="${S.ink}" text-anchor="middle" transform="rotate(-90 ${f1(off - 4)} ${f1(mid)})">${label}</text>`
+  let s = `<line x1="${f1(off)}" y1="${f1(a)}" x2="${f1(off)}" y2="${f1(b)}" stroke="${col}" stroke-width="0.9"/>`
+  if (arrow) {
+    s += `<path d="M${f1(off)} ${f1(a)} L${f1(off - sz * 0.38)} ${f1(a + sz)} L${f1(off + sz * 0.38)} ${f1(a + sz)} Z" fill="${col}"/>` +
+      `<path d="M${f1(off)} ${f1(b)} L${f1(off - sz * 0.38)} ${f1(b - sz)} L${f1(off + sz * 0.38)} ${f1(b - sz)} Z" fill="${col}"/>`
+    if (extendTo != null) {
+      s += `<line x1="${f1(off)}" y1="${f1(a)}" x2="${f1(extendTo)}" y2="${f1(a)}" stroke="${col}" stroke-width="0.5"/>` +
+        `<line x1="${f1(off)}" y1="${f1(b)}" x2="${f1(extendTo)}" y2="${f1(b)}" stroke="${col}" stroke-width="0.5"/>`
+    }
+  } else {
+    s += `<line x1="${f1(off - tick)}" y1="${f1(a)}" x2="${f1(off + tick)}" y2="${f1(a)}" stroke="${col}" stroke-width="0.9"/>` +
+      `<line x1="${f1(off - tick)}" y1="${f1(b)}" x2="${f1(off + tick)}" y2="${f1(b)}" stroke="${col}" stroke-width="0.9"/>`
+  }
+  return s + `<text x="${f1(off - 4)}" y="${f1(mid)}" font-family="${S.font}" font-size="${fs}" fill="${col}" text-anchor="middle" transform="rotate(-90 ${f1(off - 4)} ${f1(mid)})">${label}</text>`
 }
 
 function gridPath(w, h, g) {
@@ -783,7 +881,10 @@ function gridPath(w, h, g) {
 
 function furnitureSVG(room, px, S) {
   const s = []
-  const stroke = `fill="${S.furnFill}" stroke="${pick(['#444', '#555', S.ink])}" stroke-width="${f1(S.thinStroke)}"`
+  // v5: on colored-CAD plans, fixture/furniture linework is thin red and/or
+  // cyan (matching real CAD layer colors) ~2/3 of the time; else dark ink.
+  const fxCol = S.fixtureInk ? pick(['#c0392b', '#d13b3b', '#0e9bbf', '#1f9ec9']) : pick(['#444', '#555', S.ink])
+  const stroke = `fill="${S.furnFill}" stroke="${fxCol}" stroke-width="${f1(S.thinStroke)}"`
   const rx = px(room.x), ry = px(room.y)
   const rw = room.w * S.ppm, rh = room.h * S.ppm
   const m = 0.35 * S.ppm // clearance from walls
