@@ -3,11 +3,12 @@
 import { analysisToScenePlan, geometryQuality } from './planProcess.js'
 import { segmentPlanImage, isUsableGeometry } from './planseg.js'
 
-const MAX_DIM = 1568 // Claude vision sweet spot — larger adds tokens, not accuracy
+const MAX_DIM = 2576 // Sonnet 5 high-res vision limit; coords map 1:1 to pixels, so thin walls/door arcs/mm text survive that 1568px lost
 const MIN_DIM = 1100 // below this, upscale: more visual tokens = thin walls survive
 // Vercel serverless bodies cap at ~4.5MB; the refine pass sends image + JSON,
 // so keep the encoded image comfortably under that.
 const MAX_DATAURL = 3_500_000
+const MIN_ENCODE_DIM = 1568 // guard-shrink floor: at 1568/JPEG the body always fit before
 
 export async function prepareImage(file) {
   const bitmap = await loadBitmap(file)
@@ -15,8 +16,8 @@ export async function prepareImage(file) {
   const scale = maxSide > MAX_DIM ? MAX_DIM / maxSide
     : maxSide < MIN_DIM ? Math.min(MAX_DIM / maxSide, 2.5)
     : 1
-  const w = Math.round(bitmap.width * scale)
-  const h = Math.round(bitmap.height * scale)
+  let w = Math.round(bitmap.width * scale)
+  let h = Math.round(bitmap.height * scale)
   const canvas = document.createElement('canvas')
   canvas.width = w
   canvas.height = h
@@ -34,6 +35,20 @@ export async function prepareImage(file) {
   if (dataUrl.length > MAX_DATAURL) {
     dataUrl = canvas.toDataURL('image/jpeg', 0.92)
     mediaType = 'image/jpeg'
+    // A 2576px JPEG can still blow the serverless body limit. Shrink and redraw
+    // from the original bitmap (never re-encode the lossy JPEG) until it fits.
+    while (dataUrl.length > MAX_DATAURL && Math.round(Math.max(w, h) * 0.8) >= MIN_ENCODE_DIM) {
+      w = Math.round(w * 0.8)
+      h = Math.round(h * 0.8)
+      canvas.width = w // resets ctx state, so re-apply smoothing/background
+      canvas.height = h
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = 'high'
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, w, h)
+      ctx.drawImage(bitmap, 0, 0, w, h)
+      dataUrl = canvas.toDataURL('image/jpeg', 0.9)
+    }
   }
   // The upscale exists for Claude's vision (more visual tokens). It actively
   // HURTS the segmentation net — a blurry 2x blowup reads far worse than the
