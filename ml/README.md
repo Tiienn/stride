@@ -202,13 +202,18 @@ effort:
       mIoU(no-bg) 0.941 (v3 scored 0.940 on the same set, but with the
       localized phantom walls aggregate IoU under-weighs).
 - [ ] Speed: enable wasm threads (needs COOP/COEP headers) and/or WebGPU
-- [ ] Generator v5 (from a real blue-CAD plan): COLORED wall styles - blue/
-      purple outline walls with red/cyan fixture linework (all current
-      styles draw walls dark); BLACK dimension chains with filled arrowheads
-      at real CAD density (v3/v4 dims are orange/gray with tick ends);
-      curved exterior walls. The blue plan's dimension lines read as walls
-      even for v4 - the pipeline now kills them deterministically via the
-      printed dimensions (planProcess dropDimensionLineWalls), but the model
-      should stop producing them in the first place.
+- [x] Generator v5 (from a real blue-CAD plan, committed as `Blue CAD
+      plan.png`): colored wall styles - blue/purple outline walls (65%
+      of colored plans) or solid fill, with red/cyan fixture linework
+      and cyan window glazing, on 30% of plans. Black arrowhead
+      dimension chains (filled triangle heads, extension lines,
+      stacked rows outside the building) always on colored plans,
+      ~50% elsewhere. v4-on-v5 IoU: wall/door/window/mIoU all ~5-6
+      points lower on colored vs non-colored samples - quantifies
+      exactly the gap this round targets.
+- [ ] Retrain on v5 data -> model-v5 release -> flip MODEL_URL,
+      benchmark vs v4 on all real fixtures (esp. Blue CAD plan.png)
+- [ ] Curved exterior walls (the blue plan's top-left arc) - not yet
+      in the generator; still a gap after v5
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
       keystone warp) / real-data flywheel
