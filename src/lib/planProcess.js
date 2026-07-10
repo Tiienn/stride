@@ -89,6 +89,7 @@ function buildInterior(analysis, ppm) {
     .filter((w) => dist2d(w.start, w.end) > 0.3)
 
   walls = axisAlign(walls)
+  walls = consolidateLines(walls, 0.22)
   walls = snapEndpoints(walls, 0.3)
   walls = mergeDuplicateWalls(walls, 0.25)
   walls = mergeCollinearOverlaps(walls)
@@ -329,6 +330,42 @@ function axisAlign(walls) {
   return walls
 }
 
+// After axisAlign, parallel axis walls that are really one line often sit a few
+// cm apart (double-traced faces, vectorizer jitter). Left alone, they poison
+// snapEndpoints: a corner cluster then holds endpoints at slightly different
+// off-axis coords, and the centroid pull drags one off its wall's axis —
+// tilting a perfectly straight wall. Collapse each run of near-coincident
+// parallel lines to a single length-weighted coordinate first, so the lines
+// truly coincide and endpoint snapping has nothing to reconcile. The 0.22m
+// window sits above vectorizer jitter yet well under the ≥0.9m spacing of any
+// two genuinely distinct parallel walls. Length-weight the mean so a long
+// confident wall isn't dragged by a short fragment.
+function consolidateLines(walls, tol) {
+  const isH = (w) => Math.abs(w.end.z - w.start.z) < 1e-6 && Math.abs(w.end.x - w.start.x) > 1e-6
+  const isV = (w) => Math.abs(w.end.x - w.start.x) < 1e-6 && Math.abs(w.end.z - w.start.z) > 1e-6
+  for (const axis of ['h', 'v']) {
+    const coord = (w) => (axis === 'h' ? w.start.z : w.start.x)
+    const items = walls
+      .filter(axis === 'h' ? isH : isV)
+      .map((w) => ({ w, c: coord(w), len: dist2d(w.start, w.end) }))
+      .sort((p, q) => p.c - q.c)
+    for (let i = 0; i < items.length; ) {
+      // bound cluster width by tol (anchor on the first member, not chaining)
+      let j = i + 1
+      while (j < items.length && items[j].c - items[i].c < tol) j++
+      const slice = items.slice(i, j)
+      const sumL = slice.reduce((s, it) => s + it.len, 0) || 1
+      const mean = slice.reduce((s, it) => s + it.c * it.len, 0) / sumL
+      for (const { w } of slice) {
+        if (axis === 'h') { w.start.z = mean; w.end.z = mean }
+        else { w.start.x = mean; w.end.x = mean }
+      }
+      i = j
+    }
+  }
+  return walls
+}
+
 function snapEndpoints(walls, radius) {
   const points = []
   for (const w of walls) for (const key of ['start', 'end']) points.push({ w, key, p: w[key] })
@@ -345,7 +382,31 @@ function snapEndpoints(walls, radius) {
       }
     } else clusters.push({ centroid: { ...pt.p }, members: [pt] })
   }
-  for (const c of clusters) for (const m of c.members) m.w[m.key] = { ...c.centroid }
+  const isH = (w) => Math.abs(w.end.z - w.start.z) < 1e-6 && Math.abs(w.end.x - w.start.x) > 1e-6
+  const isV = (w) => Math.abs(w.end.x - w.start.x) < 1e-6 && Math.abs(w.end.z - w.start.z) > 1e-6
+  const wmean = (arr) => arr.reduce((s, e) => s + e.c * e.len, 0) / (arr.reduce((s, e) => s + e.len, 0) || 1)
+  for (const c of clusters) {
+    // Rectilinearity-preserving corner: pin the shared corner at the cluster's
+    // vertical members' x and horizontal members' z, then slide each axis
+    // endpoint only ALONG its own axis onto it. This closes the corner EXACTLY
+    // at (vertical x, horizontal z) without dragging any wall off its line — a
+    // raw centroid lands between the two lines, tilting nothing but leaving a
+    // gap that shaves rooms. Diagonals keep the plain centroid pull.
+    const vs = [], hs = []
+    for (const m of c.members) {
+      const len = dist2d(m.w.start, m.w.end)
+      if (isV(m.w)) vs.push({ c: m.w.start.x, len })
+      else if (isH(m.w)) hs.push({ c: m.w.start.z, len })
+    }
+    const targetX = vs.length ? wmean(vs) : c.centroid.x
+    const targetZ = hs.length ? wmean(hs) : c.centroid.z
+    for (const m of c.members) {
+      const w = m.w
+      if (isH(w)) w[m.key] = { x: targetX, z: w.start.z }
+      else if (isV(w)) w[m.key] = { x: w.start.x, z: targetZ }
+      else w[m.key] = { ...c.centroid }
+    }
+  }
   return walls.filter((w) => dist2d(w.start, w.end) > 0.25)
 }
 
@@ -428,6 +489,8 @@ function mergeCollinearOverlaps(walls) {
 // they nearly touch.
 function snapTJunctions(walls, radius) {
   for (const w of walls) {
+    const wh = Math.abs(w.end.z - w.start.z) < 1e-6 && Math.abs(w.end.x - w.start.x) > 1e-6
+    const wv = Math.abs(w.end.x - w.start.x) < 1e-6 && Math.abs(w.end.z - w.start.z) > 1e-6
     for (const key of ['start', 'end']) {
       const p = w[key]
       let best = null
@@ -443,10 +506,23 @@ function snapTJunctions(walls, radius) {
             x: other.start.x + (other.end.x - other.start.x) * t,
             z: other.start.z + (other.end.z - other.start.z) * t,
           }
-          best = { d, proj }
+          best = { d, proj, other }
         }
       }
-      if (best && best.d > 1e-4) w[key] = best.proj
+      if (!best || best.d <= 1e-4) continue
+      // Rectilinearity-preserving projection. Snapping an axis wall onto a
+      // PERPENDICULAR target is already clean — the projection shares the
+      // endpoint's on-axis coord — so the guard only bites on a DIAGONAL
+      // target, where a raw projection would tilt an otherwise-straight wall:
+      // pin the on-axis coord and move only along the wall's own axis. A
+      // PARALLEL target is a genuine distinct wall (consolidateLines already
+      // collapsed the near-coincident faces that used to tilt here), so a
+      // divider butting it keeps the legacy projection rather than dangling.
+      const o = best.other
+      const od = Math.abs(o.end.z - o.start.z) > 1e-6 && Math.abs(o.end.x - o.start.x) > 1e-6
+      if (wh && od) w[key] = { x: best.proj.x, z: w.start.z }
+      else if (wv && od) w[key] = { x: w.start.x, z: best.proj.z }
+      else w[key] = best.proj
     }
   }
   return walls
