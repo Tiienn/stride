@@ -211,8 +211,23 @@ effort:
       ~50% elsewhere. v4-on-v5 IoU: wall/door/window/mIoU all ~5-6
       points lower on colored vs non-colored samples - quantifies
       exactly the gap this round targets.
-- [ ] Retrain on v5 data -> model-v5 release -> flip MODEL_URL,
-      benchmark vs v4 on all real fixtures (esp. Blue CAD plan.png)
+- [x] Retrained on v5 data (model-v5 release) - evaluated and NOT
+      shipped. Training was healthy (clean convergence, val mIoU 0.896,
+      best at epoch 26/30) and the ONNX passes parity, but real-fixture
+      quality lags v4: plan71 0.646 -> 0.551, apartment 0.860 -> 0.841,
+      CAD ~parity, blue plan ~parity (0.059 -> 0.046, both floored). On
+      colored synthetics v5 beats v4 by ~3 IoU points - the dialect WAS
+      learned - but the same 10k/30ep budget spread over ~30% more style
+      diversity taxed the older styles. fetch-model.mjs stays on v4.
+      Also learned: both models' raw masks on the blue plan look
+      structurally fine; its 0.05 quality floor is a VECTORIZATION
+      bottleneck (dense 36+ wall fragments), not a perception one - a
+      pipeline lead, not a training one.
+- [ ] Retrain at bigger budget (notebook now v5.1: 15k samples, 36
+      epochs, ~7-9h) -> model-v5.1 -> must beat v4 on the real fixtures
+      before shipping
+- [ ] Vectorization robustness on dense multi-fragment extractions (the
+      blue plan's real bottleneck per above)
 - [ ] Curved exterior walls (the blue plan's top-left arc) - not yet
       in the generator; still a gap after v5
 - [ ] Harder synthetics (L-shapes, diagonal walls, stairs, blueprint style,
