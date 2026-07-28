@@ -4,6 +4,11 @@
 #
 # On an RTX 3060/4070-class GPU with 10-20k synthetic samples this reaches
 # ~0.9 wall IoU in a few hours. CPU works for smoke tests only.
+#
+# last.pt is a full training-state checkpoint (model + optimizer + scheduler
+# + epoch + best mIoU) saved every epoch; --auto-resume picks it up so an
+# interrupted run continues exactly where it stopped. best.pt stays a bare
+# model state_dict — inference/export code loads it unchanged.
 import argparse
 import time
 from pathlib import Path
@@ -30,6 +35,23 @@ def iou_per_class(pred, target, num_classes):
     return ious
 
 
+def evaluate(model, val_dl, device):
+    model.eval()
+    ious = torch.zeros(NUM_CLASSES)
+    counts = torch.zeros(NUM_CLASSES)
+    with torch.no_grad():
+        for x, y in val_dl:
+            x, y = x.to(device), y.to(device)
+            pred = model(x).argmax(1)
+            for c, v in enumerate(iou_per_class(pred, y, NUM_CLASSES)):
+                if v == v:  # not nan
+                    ious[c] += v
+                    counts[c] += 1
+    per_class = (ious / counts.clamp(min=1)).tolist()
+    miou = sum(per_class[1:]) / (NUM_CLASSES - 1)  # ignore bg
+    return miou, per_class
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="ml/data/train")
@@ -42,7 +64,10 @@ def main():
     ap.add_argument("--val-frac", type=float, default=0.05)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--max-steps", type=int, default=0, help="smoke test: stop after N steps")
-    ap.add_argument("--resume", default="")
+    ap.add_argument("--resume", default="", help="checkpoint to resume from")
+    ap.add_argument("--auto-resume", action="store_true", help="resume from <out>/last.pt if it exists")
+    ap.add_argument("--assume-epoch", type=int, default=0,
+                    help="epochs already completed, used only when the resume checkpoint is a bare state_dict")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
@@ -60,20 +85,50 @@ def main():
 
     model = UNet(NUM_CLASSES, base=args.base).to(device)
     print(f"params: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
-    if args.resume:
-        model.load_state_dict(torch.load(args.resume, map_location=device))
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    resume_path = args.resume
+    if not resume_path and args.auto_resume and (out / "last.pt").exists():
+        resume_path = str(out / "last.pt")
 
     criterion = nn.CrossEntropyLoss(weight=torch.tensor(CLASS_WEIGHTS, device=device))
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler(enabled=device == "cuda")
 
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    start_epoch = 0
     best_miou = 0.0
-    step = 0
+    if resume_path:
+        ck = torch.load(resume_path, map_location=device)
+        if isinstance(ck, dict) and "model" in ck:
+            model.load_state_dict(ck["model"])
+            opt.load_state_dict(ck["opt"])
+            sched.load_state_dict(ck["sched"])
+            if ck.get("scaler") and scaler.is_enabled():
+                scaler.load_state_dict(ck["scaler"])
+            start_epoch = ck["epoch"]
+            best_miou = ck["best_miou"]
+        else:
+            # bare model state_dict (a legacy last.pt): weights only. Fast-
+            # forward the LR schedule to --assume-epoch, and establish the
+            # best-mIoU bar with a validation pass so a resumed epoch can't
+            # overwrite best.pt with something worse.
+            model.load_state_dict(ck)
+            start_epoch = args.assume_epoch
+            for _ in range(start_epoch):
+                sched.step()
+            best_miou, _ = evaluate(model, val_dl, device)
+            print(f"legacy checkpoint: baseline val mIoU {best_miou:.3f}")
+        if start_epoch >= args.epochs:
+            print(f"nothing to do: {start_epoch}/{args.epochs} epochs already completed")
+            return
+        print(f"resumed from {resume_path} at epoch {start_epoch}/{args.epochs}, "
+              f"best mIoU {best_miou:.3f}, lr {opt.param_groups[0]['lr']:.2e}")
 
-    for epoch in range(args.epochs):
+    step = 0
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         t0, running = time.time(), 0.0
         for i, (x, y) in enumerate(train_dl):
@@ -94,27 +149,22 @@ def main():
                 return
         sched.step()
 
-        model.eval()
-        ious = torch.zeros(NUM_CLASSES)
-        counts = torch.zeros(NUM_CLASSES)
-        with torch.no_grad():
-            for x, y in val_dl:
-                x, y = x.to(device), y.to(device)
-                pred = model(x).argmax(1)
-                for c, v in enumerate(iou_per_class(pred, y, NUM_CLASSES)):
-                    if v == v:  # not nan
-                        ious[c] += v
-                        counts[c] += 1
-        per_class = (ious / counts.clamp(min=1)).tolist()
-        miou = sum(per_class[1:]) / (NUM_CLASSES - 1)  # ignore bg
+        miou, per_class = evaluate(model, val_dl, device)
         report = "  ".join(f"{n}:{v:.3f}" for n, v in zip(CLASS_NAMES, per_class))
         print(f"epoch {epoch}  loss {running / len(train_dl):.4f}  val IoU [{report}]  mIoU(no-bg) {miou:.3f}  {time.time() - t0:.0f}s")
 
-        torch.save(model.state_dict(), out / "last.pt")
         if miou > best_miou:
             best_miou = miou
             torch.save(model.state_dict(), out / "best.pt")
             print(f"  ↑ new best ({miou:.3f}) saved")
+        torch.save({
+            "model": model.state_dict(),
+            "opt": opt.state_dict(),
+            "sched": sched.state_dict(),
+            "scaler": scaler.state_dict() if scaler.is_enabled() else None,
+            "epoch": epoch + 1,
+            "best_miou": best_miou,
+        }, out / "last.pt")
 
 
 if __name__ == "__main__":
